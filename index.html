@@ -1,0 +1,762 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Parcel — a rectangle puzzle</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Baloo+2:wght@500;600;700;800&family=Nunito:wght@400;600;700;800&display=swap" rel="stylesheet">
+<!--
+  No external JavaScript libraries at all - this file is 100% plain
+  DOM manipulation. There is nothing to version-pin, nothing that can
+  ship a breaking change out from under you, and nothing to keep an
+  eye on for security advisories. The only external request this page
+  makes is the Google Fonts stylesheet above, which is just CSS.
+-->
+<style>
+  html, body { margin: 0; padding: 0; background: #F6F3FC; }
+  #app { min-height: 100vh; }
+  * { box-sizing: border-box; }
+  .pc-btn { cursor: pointer; transition: transform 0.08s ease, filter 0.15s ease; }
+  .pc-btn:hover { filter: brightness(1.12); }
+  .pc-btn:active { transform: scale(0.97); }
+  .pc-cell:focus-visible, .pc-btn:focus-visible { outline: 2px solid #5B8DEF; outline-offset: 2px; }
+  @media (prefers-reduced-motion: reduce) { .pc-btn { transition: none !important; } }
+  .pc-scroll::-webkit-scrollbar { height: 8px; }
+  .pc-scroll::-webkit-scrollbar-thumb { background: #E4E0F5; border-radius: 4px; }
+</style>
+</head>
+<body>
+<div id="app"></div>
+
+<script>
+/*
+  PARCEL — a rectangle-division puzzle (a.k.a. "Shikaku").
+  No framework: this file builds and updates the DOM directly. State
+  lives in a handful of plain variables below; every state-changing
+  action calls refreshUI() to bring the screen back in sync.
+
+  Difficulty changes the grid size and how strongly the generator
+  favors larger rectangles. A "wrong move" is counted every time the
+  player presses "Clear selected" (or its Backspace/Delete shortcut).
+  Fireworks launch from each solved rectangle's own position and color.
+  Rectangles are placed by press-and-drag painting: release once the
+  painted area covers exactly one clue number.
+  NOTE on uniqueness: the generator guarantees at least one valid
+  solution exists, not that it's the only one.
+*/
+
+// ---------- Puzzle generation (unchanged logic, framework-independent) ----------
+
+const ALLOWED_AREAS = [2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 15, 16];
+const ALLOWED_SET = new Set(ALLOWED_AREAS);
+
+const DIFFICULTIES = {
+  Easy: { cols: 11, rows: 7, weightPow: 1.8, aspectPenalty: 0.5, maxBlocks: 0, cell: 44 },
+  Medium: { cols: 14, rows: 9, weightPow: 1.5, aspectPenalty: 0.6, maxBlocks: 0, cell: 40 },
+  Hard: { cols: 17, rows: 10, weightPow: 1.1, aspectPenalty: 1.2, maxBlocks: 2, cell: 36 },
+  Expert: { cols: 17, rows: 13, weightPow: 0.9, aspectPenalty: 1.4, maxBlocks: 3, cell: 32 },
+};
+
+function rnd(n) { return Math.floor(Math.random() * n); }
+
+// Anchoring always at the strict topmost-leftmost free cell produces a
+// left-to-right sweep that tends to carve the grid into tall vertical
+// bands. Instead: always work on the topmost row that still has free
+// cells (this keeps the reliability guarantee - it never stands up an
+// isolated pocket far from the sweep front), but pick a RANDOM free
+// column within that row rather than always the leftmost one. Combined
+// with an aspect-ratio penalty below, this breaks up the banding and
+// produces much more varied, mixed layouts.
+function generateOnce(cols, rows, weightPow, aspectPenalty, blocked) {
+  const free = Array.from({ length: rows }, (_, r) => Array.from({ length: cols }, (_, c) => !blocked[r][c]));
+  const pieces = [];
+
+  while (true) {
+    let r0 = -1;
+    for (let r = 0; r < rows; r++) {
+      if (free[r].some(Boolean)) { r0 = r; break; }
+    }
+    if (r0 === -1) break;
+    const freeColsInRow = [];
+    for (let c = 0; c < cols; c++) if (free[r0][c]) freeColsInRow.push(c);
+    const c0 = freeColsInRow[rnd(freeColsInRow.length)];
+
+    let rowMaxW = 0;
+    while (c0 + rowMaxW < cols && free[r0][c0 + rowMaxW]) rowMaxW++;
+    let colMaxH = 0;
+    while (r0 + colMaxH < rows && free[r0 + colMaxH][c0]) colMaxH++;
+
+    const effMaxW = new Array(colMaxH + 1).fill(0);
+    let runningMin = rowMaxW;
+    for (let h2 = 1; h2 <= colMaxH; h2++) {
+      let w = 0;
+      const row = r0 + h2 - 1;
+      while (c0 + w < cols && free[row][c0 + w]) w++;
+      runningMin = Math.min(runningMin, w);
+      effMaxW[h2] = runningMin;
+    }
+
+    const candidates = [];
+    for (let h2 = 1; h2 <= colMaxH; h2++) {
+      const maxW = effMaxW[h2];
+      for (let w = 1; w <= maxW; w++) {
+        const area = w * h2;
+        if (ALLOWED_SET.has(area)) candidates.push({ w, h: h2, area });
+      }
+    }
+    if (candidates.length === 0) return null;
+
+    // weight favors larger areas (weightPow) but is discounted for
+    // elongated shapes (aspectPenalty) - a 1x8 strip and a 2x4 rectangle
+    // have the same area but very different "does this look like an
+    // obvious column?" feel, and this makes the squarer one more likely.
+    const weights = candidates.map((c) => {
+      const aspect = Math.max(c.w, c.h) / Math.min(c.w, c.h);
+      return Math.pow(c.area, weightPow) / Math.pow(aspect, aspectPenalty);
+    });
+    const totalW = weights.reduce((a, b) => a + b, 0);
+    let rWeight = Math.random() * totalW;
+    let idx = 0;
+    for (; idx < candidates.length; idx++) { rWeight -= weights[idx]; if (rWeight <= 0) break; }
+    const { w, h: hh } = candidates[Math.min(idx, candidates.length - 1)];
+
+    for (let r = r0; r < r0 + hh; r++) for (let c = c0; c < c0 + w; c++) free[r][c] = false;
+    pieces.push({ x: c0, y: r0, w, h: hh, area: w * hh });
+  }
+  return pieces;
+}
+
+// Solid blocks: a handful of cells that no rectangle can ever cover, acting
+// like internal walls. Regenerated fresh on every retry attempt (not fixed
+// once) so an unlucky placement that would strand an uncoverable cell just
+// becomes another dead end that gets retried away, rather than a permanently
+// broken puzzle.
+function randomBlocks(cols, rows, maxCount) {
+  const count = rnd(maxCount + 1); // 0..maxCount inclusive - "a few, randomly"
+  const blocked = Array.from({ length: rows }, () => Array(cols).fill(false));
+  let placed = 0, attempts = 0;
+  while (placed < count && attempts < 200) {
+    attempts++;
+    const r = rnd(rows), c = rnd(cols);
+    if (!blocked[r][c]) { blocked[r][c] = true; placed++; }
+  }
+  return blocked;
+}
+
+function generatePieces(cols, rows, weightPow, aspectPenalty, maxBlocks, maxTries = 3000) {
+  for (let i = 0; i < maxTries; i++) {
+    const blocked = randomBlocks(cols, rows, maxBlocks);
+    const p = generateOnce(cols, rows, weightPow, aspectPenalty, blocked);
+    if (p) return { pieces: p, blocked };
+  }
+  return null;
+}
+
+function makePuzzle(difficultyKey) {
+  const cfg = DIFFICULTIES[difficultyKey];
+  const { pieces, blocked } = generatePieces(cfg.cols, cfg.rows, cfg.weightPow, cfg.aspectPenalty, cfg.maxBlocks);
+  const clues = pieces.map((p, i) => {
+    const clueX = p.x + rnd(p.w);
+    const clueY = p.y + rnd(p.h);
+    return { id: `c${i}`, clueX, clueY, area: p.area, solution: p };
+  });
+  return { clues, cols: cfg.cols, rows: cfg.rows, cell: cfg.cell, blocked };
+}
+
+function colorForIndex(i) {
+  const hue = Math.round((i * 137.508) % 360);
+  return `hsl(${hue} 68% 70%)`;
+}
+
+// used for rectangles that are painted but NOT yet the correct size/position -
+// heavily desaturated and pale rather than just a lighter version of the same
+// vivid hue, so "not done yet" reads clearly at a glance instead of blending in
+function fadedColorForIndex(i) {
+  const hue = Math.round((i * 137.508) % 360);
+  return `hsl(${hue} 22% 91%)`;
+}
+
+function vividColorForIndex(i) {
+  const hue = Math.round((i * 137.508) % 360);
+  return `hsl(${hue} 85% 55%)`;
+}
+
+function rectContainsClue(clue, rect) {
+  return (
+    clue.clueX >= rect.x && clue.clueX < rect.x + rect.w &&
+    clue.clueY >= rect.y && clue.clueY < rect.y + rect.h
+  );
+}
+
+function isCorrectPlacement(clue, rect) {
+  if (!rect) return false;
+  return rect.w * rect.h === clue.area && rectContainsClue(clue, rect);
+}
+
+function rectOverlapsBlocked(rect, blocked) {
+  for (let y = rect.y; y < rect.y + rect.h; y++) {
+    for (let x = rect.x; x < rect.x + rect.w; x++) {
+      if (blocked[y] && blocked[y][x]) return true;
+    }
+  }
+  return false;
+}
+
+function formatTime(totalSeconds) {
+  const m = Math.floor(totalSeconds / 60);
+  const s = totalSeconds % 60;
+  return `${m}:${String(s).padStart(2, "0")}`;
+}
+
+// ---------- Fireworks (plain canvas, unchanged from before - never depended on a framework) ----------
+
+let fwCanvas = null, fwCtx = null, fwRafId = null, fwCleanup = null;
+
+function ensureFireworksCanvas() {
+  if (fwCanvas) return;
+  fwCanvas = document.createElement("canvas");
+  Object.assign(fwCanvas.style, {
+    position: "fixed", top: 0, left: 0, width: "100%", height: "100%",
+    pointerEvents: "none", zIndex: 9999,
+  });
+  document.body.appendChild(fwCanvas);
+}
+
+function stopFireworks() {
+  if (fwCleanup) { fwCleanup(); fwCleanup = null; }
+}
+
+function startFireworks(origins, anchorEl) {
+  ensureFireworksCanvas();
+  fwCtx = fwCanvas.getContext("2d");
+  stopFireworks(); // clear any previous run first
+
+  const resize = () => {
+    fwCanvas.width = fwCanvas.offsetWidth;
+    fwCanvas.height = fwCanvas.offsetHeight;
+  };
+  resize();
+  window.addEventListener("resize", resize);
+
+  const box = anchorEl
+    ? anchorEl.getBoundingClientRect()
+    : { left: fwCanvas.width * 0.3, top: fwCanvas.height * 0.3, width: fwCanvas.width * 0.4, height: fwCanvas.height * 0.4 };
+
+  const spawnPoints =
+    origins && origins.length
+      ? origins.map((o) => ({
+          x: box.left + o.xFrac * box.width,
+          y: box.top + o.yFrac * box.height,
+          color: o.color,
+        }))
+      : [{ x: box.left + box.width / 2, y: box.top + box.height / 2, color: "#7C6FE0" }];
+
+  let rockets = [];
+  let particles = [];
+  let running = true;
+  let lastBurst = 0;
+  const startTime = performance.now();
+  const LAUNCH_DURATION = 3600;
+
+  function spawnRocket() {
+    const origin = spawnPoints[Math.floor(Math.random() * spawnPoints.length)];
+    const jitterX = (Math.random() - 0.5) * 14;
+    const travel = 70 + Math.random() * 170;
+    rockets.push({
+      x: origin.x + jitterX, y: origin.y, targetY: origin.y - travel,
+      vy: -(5 + Math.random() * 2.5), color: origin.color,
+    });
+  }
+
+  function explode(x, y, color) {
+    const count = 60 + Math.floor(Math.random() * 40);
+    for (let i = 0; i < count; i++) {
+      const angle = (Math.PI * 2 * i) / count + Math.random() * 0.3;
+      const speed = 2.5 + Math.random() * 5.5;
+      particles.push({
+        x, y, vx: Math.cos(angle) * speed, vy: Math.sin(angle) * speed,
+        life: 1, decay: 0.008 + Math.random() * 0.01, size: 2.5 + Math.random() * 2, color,
+      });
+    }
+  }
+
+  function tick(now) {
+    if (!running) return;
+    const elapsedMs = now - startTime;
+    fwCtx.clearRect(0, 0, fwCanvas.width, fwCanvas.height);
+
+    if (elapsedMs < LAUNCH_DURATION && now - lastBurst > 260) {
+      spawnRocket();
+      if (Math.random() < 0.5) spawnRocket();
+      lastBurst = now;
+    }
+
+    rockets = rockets.filter((r) => {
+      r.y += r.vy;
+      fwCtx.beginPath();
+      fwCtx.fillStyle = r.color;
+      fwCtx.arc(r.x, r.y, 3, 0, Math.PI * 2);
+      fwCtx.fill();
+      if (r.y <= r.targetY) { explode(r.x, r.y, r.color); return false; }
+      return true;
+    });
+
+    particles = particles.filter((p) => {
+      p.vy += 0.045;
+      p.x += p.vx;
+      p.y += p.vy;
+      p.life -= p.decay;
+      if (p.life <= 0) return false;
+      fwCtx.globalAlpha = Math.max(p.life, 0);
+      fwCtx.shadowBlur = 12;
+      fwCtx.shadowColor = p.color;
+      fwCtx.beginPath();
+      fwCtx.fillStyle = p.color;
+      fwCtx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+      fwCtx.fill();
+      fwCtx.shadowBlur = 0;
+      fwCtx.globalAlpha = 1;
+      return true;
+    });
+
+    if (elapsedMs < LAUNCH_DURATION || particles.length > 0 || rockets.length > 0) {
+      fwRafId = requestAnimationFrame(tick);
+    } else {
+      fwCtx.clearRect(0, 0, fwCanvas.width, fwCanvas.height);
+    }
+  }
+
+  fwRafId = requestAnimationFrame(tick);
+
+  fwCleanup = () => {
+    running = false;
+    if (fwRafId) cancelAnimationFrame(fwRafId);
+    window.removeEventListener("resize", resize);
+    fwCtx.clearRect(0, 0, fwCanvas.width, fwCanvas.height);
+  };
+}
+
+// ---------- Game state ----------
+
+let difficulty = "Medium";
+let puzzle = null;
+let placements = {};
+let selectedId = null;
+let dragStart = null, dragCurrent = null;
+let won = false;
+let elapsed = 0;
+let wrongMoves = 0;
+let finalTime = null;
+let timerInterval = null;
+let clueByIdMap = {}, clueColorMap = {}, fadedColorMap = {};
+
+// ---------- DOM element references (built once, updated in place) ----------
+
+let els = {}; // filled in by buildSkeleton()
+let cellEls = []; // 2D array of <button> elements, rebuilt per puzzle
+
+function buildSkeleton() {
+  const app = document.getElementById("app");
+  Object.assign(app.style, {
+    minHeight: "100%", width: "100%", background: "#F6F3FC", color: "#2E2B45",
+    fontFamily: "'Nunito', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
+    display: "flex", flexDirection: "column", alignItems: "center",
+    padding: "28px 14px 44px",
+  });
+
+  const header = document.createElement("div");
+  header.style.textAlign = "center";
+  header.style.marginBottom = "18px";
+  const title = document.createElement("div");
+  Object.assign(title.style, { fontFamily: "'Baloo 2', sans-serif", fontWeight: 700, fontSize: "34px", letterSpacing: "-0.01em" });
+  const titleSpan = document.createElement("span");
+  titleSpan.style.color = "#7C6FE0";
+  titleSpan.textContent = "Parcel";
+  title.appendChild(titleSpan);
+  const subtitle = document.createElement("div");
+  Object.assign(subtitle.style, { fontSize: "13px", opacity: 0.62, marginTop: "4px", maxWidth: "480px" });
+  subtitle.textContent = "Divide the grid into rectangles. Each number is how many cells its rectangle covers. Every cell belongs to exactly one rectangle.";
+  header.appendChild(title);
+  header.appendChild(subtitle);
+  app.appendChild(header);
+
+  const diffRow = document.createElement("div");
+  Object.assign(diffRow.style, { display: "flex", gap: "8px", marginBottom: "10px", flexWrap: "wrap", justifyContent: "center" });
+  els.diffButtons = {};
+  Object.keys(DIFFICULTIES).forEach((d) => {
+    const btn = document.createElement("button");
+    btn.className = "pc-btn";
+    btn.textContent = d;
+    Object.assign(btn.style, {
+      padding: "7px 16px", borderRadius: "999px", border: "1px solid #E4E0F5",
+      fontWeight: 700, fontSize: "13px",
+    });
+    btn.onclick = () => newGame(d);
+    diffRow.appendChild(btn);
+    els.diffButtons[d] = btn;
+  });
+  app.appendChild(diffRow);
+
+  els.gridSizeInfo = document.createElement("div");
+  Object.assign(els.gridSizeInfo.style, { fontSize: "11px", opacity: 0.5, marginBottom: "10px" });
+  app.appendChild(els.gridSizeInfo);
+
+  const statsRow = document.createElement("div");
+  Object.assign(statsRow.style, { display: "flex", gap: "8px", marginBottom: "14px", flexWrap: "wrap", justifyContent: "center" });
+  els.timer = document.createElement("div");
+  Object.assign(els.timer.style, { padding: "6px 14px", borderRadius: "999px", border: "1px solid #E4E0F5", background: "#FFFFFF", fontWeight: 700, fontSize: "13px" });
+  els.wrongMoves = document.createElement("div");
+  Object.assign(els.wrongMoves.style, { padding: "6px 14px", borderRadius: "999px", border: "1px solid #E4E0F5", background: "#FFFFFF", fontWeight: 700, fontSize: "13px" });
+  statsRow.appendChild(els.timer);
+  statsRow.appendChild(els.wrongMoves);
+  app.appendChild(statsRow);
+
+  const btnRow = document.createElement("div");
+  Object.assign(btnRow.style, { display: "flex", gap: "8px", marginBottom: "16px", flexWrap: "wrap", justifyContent: "center" });
+  const newBtn = document.createElement("button");
+  newBtn.className = "pc-btn";
+  newBtn.textContent = "New puzzle";
+  Object.assign(newBtn.style, { padding: "7px 16px", borderRadius: "999px", border: "1px solid #E4E0F5", background: "#FFFFFF", color: "#2E2B45", fontWeight: 600, fontSize: "13px" });
+  newBtn.onclick = () => newGame(difficulty);
+  els.clearBtn = document.createElement("button");
+  els.clearBtn.className = "pc-btn";
+  els.clearBtn.textContent = "Clear selected";
+  Object.assign(els.clearBtn.style, { padding: "7px 16px", borderRadius: "999px", border: "1px solid #E4E0F5", background: "#FFFFFF", fontWeight: 600, fontSize: "13px" });
+  els.clearBtn.onclick = clearSelected;
+  btnRow.appendChild(newBtn);
+  btnRow.appendChild(els.clearBtn);
+  app.appendChild(btnRow);
+
+  const scrollWrap = document.createElement("div");
+  scrollWrap.className = "pc-scroll";
+  Object.assign(scrollWrap.style, { maxWidth: "100%", overflowX: "auto", padding: "4px" });
+  const gridWrap = document.createElement("div");
+  Object.assign(gridWrap.style, { position: "relative", display: "inline-block" });
+  els.gridContainer = document.createElement("div");
+  els.gridContainer.setAttribute("role", "grid");
+  Object.assign(els.gridContainer.style, {
+    display: "grid", border: "3px solid #3F3B5C", borderRadius: "8px", overflow: "hidden",
+    touchAction: "none", userSelect: "none",
+  });
+  els.dragBadge = document.createElement("div");
+  Object.assign(els.dragBadge.style, {
+    position: "absolute", transform: "translateX(-50%)", color: "#FFFFFF",
+    padding: "3px 9px", borderRadius: "6px", fontSize: "12px", fontWeight: 700,
+    fontFamily: "'Baloo 2', sans-serif", pointerEvents: "none", whiteSpace: "nowrap",
+    zIndex: 5, display: "none",
+  });
+  gridWrap.appendChild(els.gridContainer);
+  gridWrap.appendChild(els.dragBadge);
+  scrollWrap.appendChild(gridWrap);
+  app.appendChild(scrollWrap);
+
+  const instructions = document.createElement("div");
+  Object.assign(instructions.style, { fontSize: "12px", opacity: 0.55, marginTop: "14px", textAlign: "center", maxWidth: "460px" });
+  instructions.textContent = 'Press anywhere and drag to paint a rectangle — release once it covers exactly one number (the number doesn\'t need to be at a corner, or even where you started dragging). A tap with no drag selects an existing rectangle so Backspace/Delete or "Clear selected" can remove it. Escape deselects. On Hard and Expert, a few dark solid cells may appear — no rectangle can ever cover those.';
+  app.appendChild(instructions);
+
+  els.winBanner = document.createElement("div");
+  Object.assign(els.winBanner.style, {
+    marginTop: "18px", padding: "10px 20px", borderRadius: "10px",
+    background: "#3DCB8622", border: "1px solid #2FA46A", color: "#2FA46A",
+    fontWeight: 700, fontFamily: "'Baloo 2', sans-serif", textAlign: "center", display: "none",
+  });
+  app.appendChild(els.winBanner);
+
+  // Pointer handling lives on the grid container itself - one set of
+  // listeners, capture routes subsequent move/up events here regardless
+  // of where the pointer physically travels.
+  els.gridContainer.addEventListener("pointerdown", (e) => {
+    const cell = cellFromPoint(e.clientX, e.clientY);
+    if (puzzle.blocked[cell.r][cell.c]) return; // solid blocks can't be painted on or selected
+    els.gridContainer.setPointerCapture(e.pointerId);
+    dragStart = cell;
+    dragCurrent = dragStart;
+    refreshUI();
+  });
+  els.gridContainer.addEventListener("pointermove", (e) => {
+    if (!dragStart) return;
+    dragCurrent = cellFromPoint(e.clientX, e.clientY);
+    refreshUI();
+  });
+  els.gridContainer.addEventListener("pointerup", (e) => {
+    if (!dragStart) return;
+    handlePointerUp(cellFromPoint(e.clientX, e.clientY));
+  });
+
+  window.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") { selectedId = null; dragStart = null; dragCurrent = null; refreshUI(); }
+    if ((e.key === "Backspace" || e.key === "Delete") && selectedId) clearSelected();
+  });
+}
+
+function cellFromPoint(clientX, clientY) {
+  const box = els.gridContainer.getBoundingClientRect();
+  let c = Math.floor((clientX - box.left) / puzzle.cell);
+  let r = Math.floor((clientY - box.top) / puzzle.cell);
+  c = Math.max(0, Math.min(puzzle.cols - 1, c));
+  r = Math.max(0, Math.min(puzzle.rows - 1, r));
+  return { r, c };
+}
+
+function cellClue(r, c) {
+  return puzzle.clues.find((cl) => cl.clueX === c && cl.clueY === r) || null;
+}
+
+function handlePointerUp(end) {
+  const isPlainTap = dragStart.r === end.r && dragStart.c === end.c;
+
+  if (isPlainTap) {
+    const coveringHere = computeCellCoverage(dragStart.r, dragStart.c);
+    const clueHere = cellClue(dragStart.r, dragStart.c) || (coveringHere.length === 1 ? clueByIdMap[coveringHere[0]] : null);
+    if (clueHere) selectedId = clueHere.id;
+  } else {
+    const x0 = Math.min(dragStart.c, end.c), x1 = Math.max(dragStart.c, end.c);
+    const y0 = Math.min(dragStart.r, end.r), y1 = Math.max(dragStart.r, end.r);
+    const rect = { x: x0, y: y0, w: x1 - x0 + 1, h: y1 - y0 + 1 };
+    const covered = puzzle.clues.filter((cl) => rectContainsClue(cl, rect));
+    if (covered.length === 1 && !rectOverlapsBlocked(rect, puzzle.blocked)) {
+      placements[covered[0].id] = rect;
+      selectedId = covered[0].id;
+    }
+  }
+
+  dragStart = null;
+  dragCurrent = null;
+  refreshUI();
+}
+
+function clearSelected() {
+  if (!selectedId) return;
+  wrongMoves++;
+  delete placements[selectedId];
+  refreshUI();
+}
+
+// ---------- Coverage / win logic (same as before, just plain functions now) ----------
+
+function rectFor(clue) {
+  const p = placements[clue.id];
+  return p || { x: clue.clueX, y: clue.clueY, w: 1, h: 1 };
+}
+
+function computeCoverage() {
+  const grid = Array.from({ length: puzzle.rows }, () => Array.from({ length: puzzle.cols }, () => []));
+  puzzle.clues.forEach((clue) => {
+    const r = rectFor(clue);
+    for (let y = r.y; y < r.y + r.h; y++) {
+      for (let x = r.x; x < r.x + r.w; x++) {
+        if (y >= 0 && y < puzzle.rows && x >= 0 && x < puzzle.cols) grid[y][x].push(clue.id);
+      }
+    }
+  });
+  return grid;
+}
+
+function computeCellCoverage(r, c) {
+  const ids = [];
+  puzzle.clues.forEach((clue) => {
+    const rect = rectFor(clue);
+    if (c >= rect.x && c < rect.x + rect.w && r >= rect.y && r < rect.y + rect.h) ids.push(clue.id);
+  });
+  return ids;
+}
+
+function computeWon(coverage) {
+  for (let r = 0; r < puzzle.rows; r++)
+    for (let c = 0; c < puzzle.cols; c++)
+      if (coverage[r][c].length > 1) return false;
+  return puzzle.clues.every((clue) => isCorrectPlacement(clue, placements[clue.id]));
+}
+
+// ---------- Building/refreshing the grid ----------
+
+function buildGrid() {
+  els.gridContainer.innerHTML = "";
+  els.gridContainer.style.gridTemplateColumns = `repeat(${puzzle.cols}, ${puzzle.cell}px)`;
+  els.gridContainer.style.gridTemplateRows = `repeat(${puzzle.rows}, ${puzzle.cell}px)`;
+  els.gridContainer.setAttribute("aria-label", `${puzzle.cols} by ${puzzle.rows} puzzle grid`);
+
+  cellEls = [];
+  for (let r = 0; r < puzzle.rows; r++) {
+    const row = [];
+    for (let c = 0; c < puzzle.cols; c++) {
+      const btn = document.createElement("button");
+      btn.className = "pc-cell pc-btn";
+      btn.setAttribute("role", "gridcell");
+      Object.assign(btn.style, {
+        width: puzzle.cell + "px", height: puzzle.cell + "px",
+        fontFamily: "'Baloo 2', sans-serif", fontSize: (puzzle.cell >= 38 ? 16 : 14) + "px",
+        fontWeight: 700, padding: "0", color: "#2E2B45",
+      });
+      els.gridContainer.appendChild(btn);
+      row.push(btn);
+    }
+    cellEls.push(row);
+  }
+}
+
+function computePreviewRect() {
+  return dragStart && dragCurrent
+    ? {
+        x: Math.min(dragStart.c, dragCurrent.c), y: Math.min(dragStart.r, dragCurrent.r),
+        w: Math.abs(dragStart.c - dragCurrent.c) + 1, h: Math.abs(dragStart.r - dragCurrent.r) + 1,
+      }
+    : null;
+}
+
+function updateGrid(coverage) {
+  const previewRect = computePreviewRect();
+
+  for (let r = 0; r < puzzle.rows; r++) {
+    for (let c = 0; c < puzzle.cols; c++) {
+      const btn = cellEls[r][c];
+      const isBlocked = puzzle.blocked[r][c];
+      const coveringIds = coverage[r][c];
+      const conflict = coveringIds.length > 1;
+      const coveredBy = coveringIds.length === 1 ? coveringIds[0] : null;
+      const clue = cellClue(r, c);
+      const isSelected = !!(clue && clue.id === selectedId);
+
+      let bg = "transparent";
+      let bgImage = "none";
+      if (isBlocked) bg = "#3F3B5C";
+      else if (conflict) bg = "#F2555F55";
+      else if (coveredBy) {
+        const p = placements[coveredBy];
+        const correct = isCorrectPlacement(clueByIdMap[coveredBy], p);
+        bg = correct ? clueColorMap[coveredBy] : fadedColorMap[coveredBy];
+        if (!correct) {
+          bgImage = "repeating-linear-gradient(45deg, rgba(63,59,92,0.10) 0px, rgba(63,59,92,0.10) 5px, transparent 5px, transparent 10px)";
+        }
+      }
+
+      const inPreview =
+        !isBlocked && !!previewRect && c >= previewRect.x && c < previewRect.x + previewRect.w &&
+        r >= previewRect.y && r < previewRect.y + previewRect.h;
+
+      const rightId = c + 1 < puzzle.cols ? (coverage[r][c + 1][0] ?? null) : "edge";
+      const downId = r + 1 < puzzle.rows ? (coverage[r + 1][c][0] ?? null) : "edge";
+      const thisId = coveringIds[0] ?? null;
+
+      btn.style.border = "1px solid #E4E0F5";
+      btn.style.borderRight = rightId !== thisId ? "2px solid #A79CD9" : "1px solid #EDEAF7";
+      btn.style.borderBottom = downId !== thisId ? "2px solid #A79CD9" : "1px solid #EDEAF7";
+      btn.style.background = inPreview ? "#F2994A33" : bg;
+      btn.style.backgroundImage = inPreview ? "none" : bgImage;
+      btn.style.cursor = isBlocked ? "default" : "pointer";
+      btn.style.outline = isSelected ? "3px solid #5B8DEF" : inPreview ? "2px dashed #F2994A" : "none";
+      btn.style.outlineOffset = "-2px";
+      btn.textContent = clue ? clue.area : "";
+      btn.setAttribute("aria-label", isBlocked ? `Row ${r + 1} column ${c + 1}, solid block` : clue ? `Row ${r + 1} column ${c + 1}, clue ${clue.area}` : `Row ${r + 1} column ${c + 1}`);
+    }
+  }
+}
+
+// Live cell count while dragging - shows how many cells are in the
+// in-progress rectangle, and its target size once exactly one clue
+// number falls inside it (most helpful for long, hard-to-eyeball strips).
+function updateDragBadge() {
+  const previewRect = computePreviewRect();
+  if (!previewRect) {
+    els.dragBadge.style.display = "none";
+    return;
+  }
+  const count = previewRect.w * previewRect.h;
+  const coveredByPreview = puzzle.clues.filter((cl) => rectContainsClue(cl, previewRect));
+  const target = coveredByPreview.length === 1 ? coveredByPreview[0].area : null;
+  const isOverflow = target !== null && count > target;
+  const label = target !== null ? `${count} / ${target}` : `${count} cell${count === 1 ? "" : "s"}`;
+  const badgeAboveTop = previewRect.y * puzzle.cell - 28;
+  const badgeTop = badgeAboveTop >= 0 ? badgeAboveTop : (previewRect.y + previewRect.h) * puzzle.cell + 6;
+  const badgeLeft = previewRect.x * puzzle.cell + (previewRect.w * puzzle.cell) / 2;
+
+  els.dragBadge.style.display = "block";
+  els.dragBadge.style.left = badgeLeft + "px";
+  els.dragBadge.style.top = badgeTop + "px";
+  els.dragBadge.style.background = isOverflow ? "#F2555F" : "#3F3B5C";
+  els.dragBadge.textContent = label;
+}
+
+function refreshUI() {
+  const coverage = computeCoverage();
+  const nowWon = computeWon(coverage);
+
+  if (nowWon && !won) {
+    finalTime = elapsed;
+    const origins = puzzle.clues.map((clue, i) => {
+      const rect = placements[clue.id];
+      return { xFrac: (rect.x + rect.w / 2) / puzzle.cols, yFrac: (rect.y + rect.h / 2) / puzzle.rows, color: vividColorForIndex(i) };
+    });
+    startFireworks(origins, els.gridContainer);
+  }
+  won = nowWon;
+
+  updateGrid(coverage);
+  updateDragBadge();
+
+  els.gridSizeInfo.textContent = `${puzzle.cols} × ${puzzle.rows} grid — ${puzzle.clues.length} rectangles to place`;
+  els.timer.textContent = "⏱ " + formatTime(elapsed);
+  els.wrongMoves.textContent = "✗ " + wrongMoves + " wrong";
+  els.wrongMoves.style.color = wrongMoves > 0 ? "#F2555F" : "#2E2B45";
+
+  Object.keys(DIFFICULTIES).forEach((d) => {
+    const btn = els.diffButtons[d];
+    btn.style.background = difficulty === d ? "#7C6FE0" : "#FFFFFF";
+    btn.style.color = difficulty === d ? "#FFFFFF" : "#2E2B45";
+  });
+
+  els.clearBtn.disabled = !selectedId;
+  els.clearBtn.style.color = selectedId ? "#2E2B45" : "#B3AFCB";
+  els.clearBtn.style.cursor = selectedId ? "pointer" : "default";
+  els.clearBtn.style.background = "#FFFFFF";
+
+  if (won) {
+    els.winBanner.style.display = "block";
+    const s = wrongMoves === 1 ? "" : "s";
+    els.winBanner.textContent = `Solved in ${formatTime(finalTime ?? elapsed)} with ${wrongMoves} wrong move${s}! 🎉`;
+  } else {
+    els.winBanner.style.display = "none";
+  }
+}
+
+// ---------- Game lifecycle ----------
+
+function newGame(diffKey) {
+  difficulty = diffKey;
+  puzzle = makePuzzle(diffKey);
+  clueByIdMap = {};
+  clueColorMap = {};
+  fadedColorMap = {};
+  puzzle.clues.forEach((c, i) => { clueByIdMap[c.id] = c; clueColorMap[c.id] = colorForIndex(i); fadedColorMap[c.id] = fadedColorForIndex(i); });
+
+  placements = {};
+  selectedId = null;
+  dragStart = null;
+  dragCurrent = null;
+  won = false;
+  elapsed = 0;
+  wrongMoves = 0;
+  finalTime = null;
+
+  stopFireworks();
+  buildGrid();
+  startTimer();
+  refreshUI();
+}
+
+function startTimer() {
+  if (timerInterval) clearInterval(timerInterval);
+  timerInterval = setInterval(() => {
+    if (!won) { elapsed++; refreshUI(); }
+  }, 1000);
+}
+
+// ---------- Boot ----------
+
+buildSkeleton();
+newGame("Medium");
+</script>
+</body>
+</html>
