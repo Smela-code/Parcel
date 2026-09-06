@@ -37,8 +37,10 @@
   action calls refreshUI() to bring the screen back in sync.
 
   Difficulty changes the grid size and how strongly the generator
-  favors larger rectangles. A "wrong move" is counted every time the
-  player presses "Clear selected" (or its Backspace/Delete shortcut).
+  favors larger rectangles. A "misstep" is counted when the player
+  presses "Clear selected" (or its Backspace/Delete shortcut) on a
+  rectangle that had its full cell count selected - not on a bare
+  tap-selection or a partial/undersized attempt.
   Fireworks launch from each solved rectangle's own position and color.
   Rectangles are placed by press-and-drag painting: release once the
   painted area covers exactly one clue number.
@@ -573,9 +575,17 @@ function handlePointerUp(end) {
   refreshUI();
 }
 
+// A "misstep" is counted only when clearing a rectangle that actually had
+// its full cell count selected (area matches the clue's number) - not when
+// clearing a bare tap-selection (no placement at all) or a partial/undersized
+// attempt, since those were never "a completed guess" to begin with.
 function clearSelected() {
   if (!selectedId) return;
-  wrongMoves++;
+  const existing = placements[selectedId];
+  if (existing) {
+    const clue = clueByIdMap[selectedId];
+    if (existing.w * existing.h === clue.area) wrongMoves++;
+  }
   delete placements[selectedId];
   refreshUI();
 }
@@ -672,21 +682,27 @@ function updateGrid(coverage) {
       const isSelected = !!(clue && clue.id === selectedId);
 
       let bg = "transparent";
-      let bgImage = "none";
       if (isBlocked) bg = "#3F3B5C";
       else if (conflict) bg = "#F2555F55";
       else if (coveredBy) {
         const p = placements[coveredBy];
         const correct = isCorrectPlacement(clueByIdMap[coveredBy], p);
         bg = correct ? clueColorMap[coveredBy] : fadedColorMap[coveredBy];
-        if (!correct) {
-          bgImage = "repeating-linear-gradient(45deg, rgba(63,59,92,0.10) 0px, rgba(63,59,92,0.10) 5px, transparent 5px, transparent 10px)";
-        }
       }
 
       const inPreview =
         !isBlocked && !!previewRect && c >= previewRect.x && c < previewRect.x + previewRect.w &&
         r >= previewRect.y && r < previewRect.y + previewRect.h;
+
+      // a boundary gets dashed only when one of its two sides is a piece
+      // the player actually ATTEMPTED but got wrong - never for area that's
+      // simply not painted yet (that's just plain unpainted, not "incomplete")
+      const pieceIncomplete = (id) => {
+        if (!id || id === "edge") return false;
+        const rect = placements[id];
+        if (!rect) return false; // never attempted
+        return !isCorrectPlacement(clueByIdMap[id], rect);
+      };
 
       const rightId = c + 1 < puzzle.cols ? (coverage[r][c + 1][0] ?? null) : "edge";
       const downId = r + 1 < puzzle.rows ? (coverage[r + 1][c][0] ?? null) : "edge";
@@ -697,11 +713,16 @@ function updateGrid(coverage) {
       const screenRightId = layout.transposed ? downId : rightId;
       const screenBottomId = layout.transposed ? rightId : downId;
 
+      const rightIsBoundary = screenRightId !== thisId;
+      const bottomIsBoundary = screenBottomId !== thisId;
+      const rightDashed = rightIsBoundary && (pieceIncomplete(thisId) || pieceIncomplete(screenRightId));
+      const bottomDashed = bottomIsBoundary && (pieceIncomplete(thisId) || pieceIncomplete(screenBottomId));
+
       btn.style.border = "1px solid #E4E0F5";
-      btn.style.borderRight = screenRightId !== thisId ? "2px solid #A79CD9" : "1px solid #EDEAF7";
-      btn.style.borderBottom = screenBottomId !== thisId ? "2px solid #A79CD9" : "1px solid #EDEAF7";
+      btn.style.borderRight = rightIsBoundary ? `2px ${rightDashed ? "dashed" : "solid"} #A79CD9` : "1px solid #EDEAF7";
+      btn.style.borderBottom = bottomIsBoundary ? `2px ${bottomDashed ? "dashed" : "solid"} #A79CD9` : "1px solid #EDEAF7";
       btn.style.background = inPreview ? "#F2994A33" : bg;
-      btn.style.backgroundImage = inPreview ? "none" : bgImage;
+      btn.style.backgroundImage = "none";
       btn.style.cursor = isBlocked ? "default" : "pointer";
       btn.style.outline = isSelected ? "3px solid #5B8DEF" : inPreview ? "2px dashed #F2994A" : "none";
       btn.style.outlineOffset = "-2px";
@@ -768,7 +789,7 @@ function refreshUI() {
 
   els.gridSizeInfo.textContent = `${puzzle.cols} × ${puzzle.rows} grid — ${puzzle.clues.length} rectangles to place`;
   els.timer.textContent = "⏱ " + formatTime(elapsed);
-  els.wrongMoves.textContent = "✗ " + wrongMoves + " wrong";
+  els.wrongMoves.textContent = "✗ " + wrongMoves + " misstep" + (wrongMoves === 1 ? "" : "s");
   els.wrongMoves.style.color = wrongMoves > 0 ? "#F2555F" : "#2E2B45";
 
   Object.keys(DIFFICULTIES).forEach((d) => {
@@ -785,7 +806,7 @@ function refreshUI() {
   if (won) {
     els.winBanner.style.display = "block";
     const s = wrongMoves === 1 ? "" : "s";
-    els.winBanner.textContent = `Solved in ${formatTime(finalTime ?? elapsed)} with ${wrongMoves} wrong move${s}! 🎉`;
+    els.winBanner.textContent = `Solved in ${formatTime(finalTime ?? elapsed)} with ${wrongMoves} misstep${s}! 🎉`;
   } else {
     els.winBanner.style.display = "none";
   }
