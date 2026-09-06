@@ -350,6 +350,31 @@ let wrongMoves = 0;
 let finalTime = null;
 let timerInterval = null;
 let clueByIdMap = {}, clueColorMap = {}, fadedColorMap = {};
+let layout = { transposed: false, displayCols: 0, displayRows: 0, cell: 0 };
+
+// ---------- Responsive layout: transpose + resize for narrow screens ----------
+// On a narrow portrait screen (phone), swap which puzzle dimension renders
+// horizontally vs vertically - this is a LAYOUT transpose, not a visual CSS
+// rotation, so numbers stay upright and all the touch math below stays plain
+// axis-aligned arithmetic (no rotation trigonometry to get wrong on a device
+// I can't physically test on). Combined with shrinking the cell size to fit
+// the actual viewport width, so wide boards never need horizontal scrolling
+// on a phone.
+function computeLayout() {
+  const vw = window.innerWidth;
+  const vh = window.innerHeight;
+  const transposed = vw < vh && vw < 700;
+  const displayCols = transposed ? puzzle.rows : puzzle.cols;
+  const displayRows = transposed ? puzzle.cols : puzzle.rows;
+  const horizontalBudget = Math.max(200, vw - 40);
+  const fitCell = Math.floor(horizontalBudget / displayCols);
+  const cell = Math.max(16, Math.min(puzzle.cell, fitCell));
+  return { transposed, displayCols, displayRows, cell };
+}
+
+function screenToLogical(sr, sc) {
+  return layout.transposed ? { r: sc, c: sr } : { r: sr, c: sc };
+}
 
 // ---------- DOM element references (built once, updated in place) ----------
 
@@ -466,10 +491,15 @@ function buildSkeleton() {
 
   // Pointer handling lives on the grid container itself - one set of
   // listeners, capture routes subsequent move/up events here regardless
-  // of where the pointer physically travels.
+  // of where the pointer physically travels. preventDefault() on down/move
+  // is a defensive measure against the browser deciding to hijack the
+  // gesture for scrolling on some touch implementations; pointercancel is
+  // handled explicitly so an interrupted gesture (e.g. the browser DOES
+  // hijack it anyway) never leaves the drag state stuck.
   els.gridContainer.addEventListener("pointerdown", (e) => {
     const cell = cellFromPoint(e.clientX, e.clientY);
     if (puzzle.blocked[cell.r][cell.c]) return; // solid blocks can't be painted on or selected
+    e.preventDefault();
     els.gridContainer.setPointerCapture(e.pointerId);
     dragStart = cell;
     dragCurrent = dragStart;
@@ -477,12 +507,18 @@ function buildSkeleton() {
   });
   els.gridContainer.addEventListener("pointermove", (e) => {
     if (!dragStart) return;
+    e.preventDefault();
     dragCurrent = cellFromPoint(e.clientX, e.clientY);
     refreshUI();
   });
   els.gridContainer.addEventListener("pointerup", (e) => {
     if (!dragStart) return;
     handlePointerUp(cellFromPoint(e.clientX, e.clientY));
+  });
+  els.gridContainer.addEventListener("pointercancel", () => {
+    dragStart = null;
+    dragCurrent = null;
+    refreshUI();
   });
 
   window.addEventListener("keydown", (e) => {
@@ -493,11 +529,11 @@ function buildSkeleton() {
 
 function cellFromPoint(clientX, clientY) {
   const box = els.gridContainer.getBoundingClientRect();
-  let c = Math.floor((clientX - box.left) / puzzle.cell);
-  let r = Math.floor((clientY - box.top) / puzzle.cell);
-  c = Math.max(0, Math.min(puzzle.cols - 1, c));
-  r = Math.max(0, Math.min(puzzle.rows - 1, r));
-  return { r, c };
+  let sc = Math.floor((clientX - box.left) / layout.cell);
+  let sr = Math.floor((clientY - box.top) / layout.cell);
+  sc = Math.max(0, Math.min(layout.displayCols - 1, sc));
+  sr = Math.max(0, Math.min(layout.displayRows - 1, sr));
+  return screenToLogical(sr, sc);
 }
 
 function cellClue(r, c) {
@@ -573,27 +609,33 @@ function computeWon(coverage) {
 // ---------- Building/refreshing the grid ----------
 
 function buildGrid() {
+  layout = computeLayout();
+
   els.gridContainer.innerHTML = "";
-  els.gridContainer.style.gridTemplateColumns = `repeat(${puzzle.cols}, ${puzzle.cell}px)`;
-  els.gridContainer.style.gridTemplateRows = `repeat(${puzzle.rows}, ${puzzle.cell}px)`;
+  els.gridContainer.style.gridTemplateColumns = `repeat(${layout.displayCols}, ${layout.cell}px)`;
+  els.gridContainer.style.gridTemplateRows = `repeat(${layout.displayRows}, ${layout.cell}px)`;
   els.gridContainer.setAttribute("aria-label", `${puzzle.cols} by ${puzzle.rows} puzzle grid`);
 
-  cellEls = [];
-  for (let r = 0; r < puzzle.rows; r++) {
-    const row = [];
-    for (let c = 0; c < puzzle.cols; c++) {
+  cellEls = Array.from({ length: puzzle.rows }, () => new Array(puzzle.cols));
+  // iterate in DISPLAY order so CSS grid auto-placement lays cells out
+  // correctly on screen; each button is still stored at its LOGICAL [r][c]
+  // so every other function keeps working purely in logical coordinates
+  for (let sr = 0; sr < layout.displayRows; sr++) {
+    for (let sc = 0; sc < layout.displayCols; sc++) {
+      const { r, c } = screenToLogical(sr, sc);
       const btn = document.createElement("button");
+      btn.type = "button";
       btn.className = "pc-cell pc-btn";
       btn.setAttribute("role", "gridcell");
       Object.assign(btn.style, {
-        width: puzzle.cell + "px", height: puzzle.cell + "px",
-        fontFamily: "'Baloo 2', sans-serif", fontSize: (puzzle.cell >= 38 ? 16 : 14) + "px",
+        width: layout.cell + "px", height: layout.cell + "px",
+        fontFamily: "'Baloo 2', sans-serif", fontSize: (layout.cell >= 38 ? 16 : 14) + "px",
         fontWeight: 700, padding: "0", color: "#2E2B45",
+        touchAction: "none", userSelect: "none", WebkitUserSelect: "none",
       });
       els.gridContainer.appendChild(btn);
-      row.push(btn);
+      cellEls[r][c] = btn;
     }
-    cellEls.push(row);
   }
 }
 
@@ -639,10 +681,15 @@ function updateGrid(coverage) {
       const rightId = c + 1 < puzzle.cols ? (coverage[r][c + 1][0] ?? null) : "edge";
       const downId = r + 1 < puzzle.rows ? (coverage[r + 1][c][0] ?? null) : "edge";
       const thisId = coveringIds[0] ?? null;
+      // in transposed mode, logical column-adjacency (rightId) runs down the
+      // SCREEN, and logical row-adjacency (downId) runs across the SCREEN -
+      // swapped from normal mode - so the border sides swap too
+      const screenRightId = layout.transposed ? downId : rightId;
+      const screenBottomId = layout.transposed ? rightId : downId;
 
       btn.style.border = "1px solid #E4E0F5";
-      btn.style.borderRight = rightId !== thisId ? "2px solid #A79CD9" : "1px solid #EDEAF7";
-      btn.style.borderBottom = downId !== thisId ? "2px solid #A79CD9" : "1px solid #EDEAF7";
+      btn.style.borderRight = screenRightId !== thisId ? "2px solid #A79CD9" : "1px solid #EDEAF7";
+      btn.style.borderBottom = screenBottomId !== thisId ? "2px solid #A79CD9" : "1px solid #EDEAF7";
       btn.style.background = inPreview ? "#F2994A33" : bg;
       btn.style.backgroundImage = inPreview ? "none" : bgImage;
       btn.style.cursor = isBlocked ? "default" : "pointer";
@@ -652,6 +699,16 @@ function updateGrid(coverage) {
       btn.setAttribute("aria-label", isBlocked ? `Row ${r + 1} column ${c + 1}, solid block` : clue ? `Row ${r + 1} column ${c + 1}, clue ${clue.area}` : `Row ${r + 1} column ${c + 1}`);
     }
   }
+}
+
+// Converts a rect defined in LOGICAL coordinates (x=col, y=row, w=col-span,
+// h=row-span) into an on-screen pixel box, accounting for the current
+// transpose state - needed anywhere a logical rect gets positioned visually.
+function logicalRectToScreenBox(rect) {
+  if (layout.transposed) {
+    return { left: rect.y * layout.cell, top: rect.x * layout.cell, width: rect.h * layout.cell, height: rect.w * layout.cell };
+  }
+  return { left: rect.x * layout.cell, top: rect.y * layout.cell, width: rect.w * layout.cell, height: rect.h * layout.cell };
 }
 
 // Live cell count while dragging - shows how many cells are in the
@@ -668,9 +725,10 @@ function updateDragBadge() {
   const target = coveredByPreview.length === 1 ? coveredByPreview[0].area : null;
   const isOverflow = target !== null && count > target;
   const label = target !== null ? `${count} / ${target}` : `${count} cell${count === 1 ? "" : "s"}`;
-  const badgeAboveTop = previewRect.y * puzzle.cell - 28;
-  const badgeTop = badgeAboveTop >= 0 ? badgeAboveTop : (previewRect.y + previewRect.h) * puzzle.cell + 6;
-  const badgeLeft = previewRect.x * puzzle.cell + (previewRect.w * puzzle.cell) / 2;
+  const box = logicalRectToScreenBox(previewRect);
+  const badgeAboveTop = box.top - 28;
+  const badgeTop = badgeAboveTop >= 0 ? badgeAboveTop : box.top + box.height + 6;
+  const badgeLeft = box.left + box.width / 2;
 
   els.dragBadge.style.display = "block";
   els.dragBadge.style.left = badgeLeft + "px";
@@ -687,7 +745,9 @@ function refreshUI() {
     finalTime = elapsed;
     const origins = puzzle.clues.map((clue, i) => {
       const rect = placements[clue.id];
-      return { xFrac: (rect.x + rect.w / 2) / puzzle.cols, yFrac: (rect.y + rect.h / 2) / puzzle.rows, color: vividColorForIndex(i) };
+      const xFrac = layout.transposed ? (rect.y + rect.h / 2) / puzzle.rows : (rect.x + rect.w / 2) / puzzle.cols;
+      const yFrac = layout.transposed ? (rect.x + rect.w / 2) / puzzle.cols : (rect.y + rect.h / 2) / puzzle.rows;
+      return { xFrac, yFrac, color: vividColorForIndex(i) };
     });
     startFireworks(origins, els.gridContainer);
   }
@@ -757,6 +817,20 @@ function startTimer() {
 
 buildSkeleton();
 newGame("Medium");
+
+// Rebuild only when the layout would actually change (transpose flips, or
+// the fitted cell size changes meaningfully) - not on every pixel of resize.
+let resizeDebounce = null;
+window.addEventListener("resize", () => {
+  clearTimeout(resizeDebounce);
+  resizeDebounce = setTimeout(() => {
+    const next = computeLayout();
+    if (next.transposed !== layout.transposed || next.cell !== layout.cell) {
+      buildGrid();
+      refreshUI();
+    }
+  }, 150);
+});
 </script>
 </body>
 </html>
