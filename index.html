@@ -491,15 +491,11 @@ function buildSkeleton() {
 
   // Pointer handling lives on the grid container itself - one set of
   // listeners, capture routes subsequent move/up events here regardless
-  // of where the pointer physically travels. preventDefault() on down/move
-  // is a defensive measure against the browser deciding to hijack the
-  // gesture for scrolling on some touch implementations; pointercancel is
-  // handled explicitly so an interrupted gesture (e.g. the browser DOES
-  // hijack it anyway) never leaves the drag state stuck.
+  // of where the pointer physically travels. pointercancel is handled
+  // explicitly so an interrupted gesture never leaves the drag state stuck.
   els.gridContainer.addEventListener("pointerdown", (e) => {
     const cell = cellFromPoint(e.clientX, e.clientY);
     if (puzzle.blocked[cell.r][cell.c]) return; // solid blocks can't be painted on or selected
-    e.preventDefault();
     els.gridContainer.setPointerCapture(e.pointerId);
     dragStart = cell;
     dragCurrent = dragStart;
@@ -507,7 +503,6 @@ function buildSkeleton() {
   });
   els.gridContainer.addEventListener("pointermove", (e) => {
     if (!dragStart) return;
-    e.preventDefault();
     dragCurrent = cellFromPoint(e.clientX, e.clientY);
     refreshUI();
   });
@@ -520,6 +515,21 @@ function buildSkeleton() {
     dragCurrent = null;
     refreshUI();
   });
+
+  // THE actual fix for "the page scrolls instead of painting a rectangle":
+  // preventDefault() on pointer events does NOT reliably stop the browser's
+  // native touch-scroll gesture - that's a common misconception (confirmed
+  // directly by a Pointer Events spec editor: panning is intentionally not
+  // tied to a pointer event's default action). CSS touch-action:none is
+  // *supposed* to be authoritative but isn't fully honored by every mobile
+  // browser in every situation. The one universally reliable mechanism is
+  // preventDefault() inside a native, explicitly NON-PASSIVE touchmove
+  // listener - this is what every production drag/draw library actually
+  // uses under the hood, precisely because relying on touch-action alone
+  // has known cross-browser gaps.
+  const preventTouchScroll = (e) => e.preventDefault();
+  els.gridContainer.addEventListener("touchstart", preventTouchScroll, { passive: false });
+  els.gridContainer.addEventListener("touchmove", preventTouchScroll, { passive: false });
 
   window.addEventListener("keydown", (e) => {
     if (e.key === "Escape") { selectedId = null; dragStart = null; dragCurrent = null; refreshUI(); }
