@@ -389,8 +389,23 @@ function buildSkeleton() {
     minHeight: "100%", width: "100%", background: "#F6F3FC", color: "#2E2B45",
     fontFamily: "'Nunito', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
     display: "flex", flexDirection: "column", alignItems: "center",
-    padding: "28px 14px 44px",
+    padding: "28px 14px 44px", position: "relative",
   });
+
+  const helpBtn = document.createElement("button");
+  helpBtn.className = "pc-btn";
+  helpBtn.type = "button";
+  helpBtn.textContent = "?";
+  helpBtn.setAttribute("aria-label", "How to play");
+  Object.assign(helpBtn.style, {
+    position: "absolute", top: "18px", right: "16px",
+    width: "30px", height: "30px", borderRadius: "50%", padding: "0",
+    border: "1px solid #E4E0F5", background: "#FFFFFF", color: "#7C6FE0",
+    fontWeight: 800, fontSize: "15px", fontFamily: "'Baloo 2', sans-serif",
+    display: "flex", alignItems: "center", justifyContent: "center",
+  });
+  helpBtn.onclick = () => { els.helpModal.style.display = "flex"; };
+  app.appendChild(helpBtn);
 
   const header = document.createElement("div");
   header.style.textAlign = "center";
@@ -478,10 +493,43 @@ function buildSkeleton() {
   scrollWrap.appendChild(gridWrap);
   app.appendChild(scrollWrap);
 
-  const instructions = document.createElement("div");
-  Object.assign(instructions.style, { fontSize: "12px", opacity: 0.55, marginTop: "14px", textAlign: "center", maxWidth: "460px" });
-  instructions.textContent = 'Press anywhere and drag to paint a rectangle — release once it covers exactly one number (the number doesn\'t need to be at a corner, or even where you started dragging). A tap with no drag selects an existing rectangle so Backspace/Delete or "Clear selected" can remove it. Escape deselects. On Hard and Expert, a few dark solid cells may appear — no rectangle can ever cover those.';
-  app.appendChild(instructions);
+  els.helpModal = document.createElement("div");
+  Object.assign(els.helpModal.style, {
+    display: "none", position: "fixed", top: "0", left: "0", width: "100%", height: "100%",
+    background: "rgba(46,43,69,0.5)", zIndex: "20", alignItems: "center", justifyContent: "center",
+    padding: "20px", boxSizing: "border-box",
+  });
+  els.helpModal.onclick = (e) => { if (e.target === els.helpModal) els.helpModal.style.display = "none"; };
+
+  const helpPanel = document.createElement("div");
+  Object.assign(helpPanel.style, {
+    background: "#FFFFFF", borderRadius: "14px", padding: "22px", maxWidth: "420px",
+    boxShadow: "0 20px 40px rgba(63,59,92,0.35)",
+  });
+  const helpTitle = document.createElement("div");
+  Object.assign(helpTitle.style, {
+    fontFamily: "'Baloo 2', sans-serif", fontWeight: 700, fontSize: "18px",
+    marginBottom: "10px", color: "#7C6FE0",
+  });
+  helpTitle.textContent = "How to play";
+  const helpText = document.createElement("div");
+  Object.assign(helpText.style, { fontSize: "13px", lineHeight: "1.55", color: "#2E2B45" });
+  helpText.textContent = 'Press anywhere and drag to paint a rectangle — release once it covers exactly one number (the number doesn\'t need to be at a corner, or even where you started dragging). A tap with no drag selects an existing rectangle so Backspace/Delete or "Clear selected" can remove it. Escape deselects. On Hard and Expert, a few dark solid cells may appear — no rectangle can ever cover those.';
+  const helpCloseBtn = document.createElement("button");
+  helpCloseBtn.className = "pc-btn";
+  helpCloseBtn.type = "button";
+  helpCloseBtn.textContent = "Got it";
+  Object.assign(helpCloseBtn.style, {
+    marginTop: "18px", padding: "8px 18px", borderRadius: "999px", border: "none",
+    background: "#7C6FE0", color: "#FFFFFF", fontWeight: 700, fontSize: "13px",
+  });
+  helpCloseBtn.onclick = () => { els.helpModal.style.display = "none"; };
+
+  helpPanel.appendChild(helpTitle);
+  helpPanel.appendChild(helpText);
+  helpPanel.appendChild(helpCloseBtn);
+  els.helpModal.appendChild(helpPanel);
+  app.appendChild(els.helpModal);
 
   els.winBanner = document.createElement("div");
   Object.assign(els.winBanner.style, {
@@ -534,7 +582,10 @@ function buildSkeleton() {
   els.gridContainer.addEventListener("touchmove", preventTouchScroll, { passive: false });
 
   window.addEventListener("keydown", (e) => {
-    if (e.key === "Escape") { selectedId = null; dragStart = null; dragCurrent = null; refreshUI(); }
+    if (e.key === "Escape") {
+      if (els.helpModal.style.display !== "none") { els.helpModal.style.display = "none"; return; }
+      selectedId = null; dragStart = null; dragCurrent = null; refreshUI();
+    }
     if ((e.key === "Backspace" || e.key === "Delete") && selectedId) clearSelected();
   });
 }
