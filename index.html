@@ -392,35 +392,33 @@ function buildSkeleton() {
     padding: "28px 14px 44px", position: "relative",
   });
 
-  const helpBtn = document.createElement("button");
-  helpBtn.className = "pc-btn";
-  helpBtn.type = "button";
-  helpBtn.textContent = "?";
-  helpBtn.setAttribute("aria-label", "How to play");
-  Object.assign(helpBtn.style, {
-    position: "absolute", top: "18px", right: "16px",
-    width: "30px", height: "30px", borderRadius: "50%", padding: "0",
-    border: "1px solid #E4E0F5", background: "#FFFFFF", color: "#7C6FE0",
-    fontWeight: 800, fontSize: "15px", fontFamily: "'Baloo 2', sans-serif",
-    display: "flex", alignItems: "center", justifyContent: "center",
-  });
-  helpBtn.onclick = () => { els.helpModal.style.display = "flex"; };
-  app.appendChild(helpBtn);
-
   const header = document.createElement("div");
-  header.style.textAlign = "center";
-  header.style.marginBottom = "18px";
+  Object.assign(header.style, {
+    display: "flex", alignItems: "center", justifyContent: "center",
+    gap: "10px", marginBottom: "18px",
+  });
   const title = document.createElement("div");
   Object.assign(title.style, { fontFamily: "'Baloo 2', sans-serif", fontWeight: 700, fontSize: "34px", letterSpacing: "-0.01em" });
   const titleSpan = document.createElement("span");
   titleSpan.style.color = "#7C6FE0";
   titleSpan.textContent = "Parcel";
   title.appendChild(titleSpan);
-  const subtitle = document.createElement("div");
-  Object.assign(subtitle.style, { fontSize: "13px", opacity: 0.62, marginTop: "4px", maxWidth: "480px" });
-  subtitle.textContent = "Divide the grid into rectangles. Each number is how many cells its rectangle covers. Every cell belongs to exactly one rectangle.";
+
+  const helpBtn = document.createElement("button");
+  helpBtn.className = "pc-btn";
+  helpBtn.type = "button";
+  helpBtn.textContent = "?";
+  helpBtn.setAttribute("aria-label", "How to play");
+  Object.assign(helpBtn.style, {
+    width: "30px", height: "30px", borderRadius: "50%", padding: "0", flexShrink: "0",
+    border: "1px solid #E4E0F5", background: "#FFFFFF", color: "#7C6FE0",
+    fontWeight: 800, fontSize: "15px", fontFamily: "'Baloo 2', sans-serif",
+    display: "flex", alignItems: "center", justifyContent: "center",
+  });
+  helpBtn.onclick = () => { els.helpModal.style.display = "flex"; };
+
   header.appendChild(title);
-  header.appendChild(subtitle);
+  header.appendChild(helpBtn);
   app.appendChild(header);
 
   const diffRow = document.createElement("div");
@@ -512,6 +510,9 @@ function buildSkeleton() {
     marginBottom: "10px", color: "#7C6FE0",
   });
   helpTitle.textContent = "How to play";
+  const helpIntro = document.createElement("div");
+  Object.assign(helpIntro.style, { fontSize: "13px", lineHeight: "1.55", color: "#2E2B45", marginBottom: "10px" });
+  helpIntro.textContent = "Divide the grid into rectangles. Each number is how many cells its rectangle covers. Every cell belongs to exactly one rectangle.";
   const helpText = document.createElement("div");
   Object.assign(helpText.style, { fontSize: "13px", lineHeight: "1.55", color: "#2E2B45" });
   helpText.textContent = 'Press anywhere and drag to paint a rectangle — release once it covers exactly one number (the number doesn\'t need to be at a corner, or even where you started dragging). A tap with no drag selects an existing rectangle so Backspace/Delete or "Clear selected" can remove it. Escape deselects. On Hard and Expert, a few dark solid cells may appear — no rectangle can ever cover those.';
@@ -526,6 +527,7 @@ function buildSkeleton() {
   helpCloseBtn.onclick = () => { els.helpModal.style.display = "none"; };
 
   helpPanel.appendChild(helpTitle);
+  helpPanel.appendChild(helpIntro);
   helpPanel.appendChild(helpText);
   helpPanel.appendChild(helpCloseBtn);
   els.helpModal.appendChild(helpPanel);
