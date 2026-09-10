@@ -54,10 +54,10 @@ const ALLOWED_AREAS = [2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 15, 16];
 const ALLOWED_SET = new Set(ALLOWED_AREAS);
 
 const DIFFICULTIES = {
-  Easy: { cols: 11, rows: 7, weightPow: 1.8, aspectPenalty: 0.5, maxBlocks: 0, cell: 44 },
-  Medium: { cols: 14, rows: 9, weightPow: 1.5, aspectPenalty: 0.6, maxBlocks: 0, cell: 40 },
-  Hard: { cols: 17, rows: 10, weightPow: 1.1, aspectPenalty: 1.2, maxBlocks: 2, cell: 36 },
-  Expert: { cols: 17, rows: 13, weightPow: 0.9, aspectPenalty: 1.4, maxBlocks: 3, cell: 32 },
+  Easy: { cols: 11, rows: 9, weightPow: 1.8, aspectPenalty: 0.5, maxBlocks: 0, maxDim: 8, cell: 40 },
+  Medium: { cols: 14, rows: 9, weightPow: 1.5, aspectPenalty: 0.6, maxBlocks: 0, maxDim: 8, cell: 40 },
+  Hard: { cols: 17, rows: 11, weightPow: 1.1, aspectPenalty: 1.2, maxBlocks: 2, maxDim: 8, cell: 36 },
+  Expert: { cols: 17, rows: 13, weightPow: 0.9, aspectPenalty: 1.4, maxBlocks: 3, maxDim: 8, cell: 32 },
 };
 
 function rnd(n) { return Math.floor(Math.random() * n); }
@@ -70,7 +70,13 @@ function rnd(n) { return Math.floor(Math.random() * n); }
 // column within that row rather than always the leftmost one. Combined
 // with an aspect-ratio penalty below, this breaks up the banding and
 // produces much more varied, mixed layouts.
-function generateOnce(cols, rows, weightPow, aspectPenalty, blocked) {
+//
+// maxDim is a HARD cap on how long any single side of a piece can be -
+// unlike aspectPenalty (a soft preference), this makes it flatly
+// impossible for a piece to span most/all of an axis, e.g. a "full-width"
+// 1xN strip. It's only applied when doing so leaves at least one
+// candidate, so it can never cause a dead end on its own.
+function generateOnce(cols, rows, weightPow, aspectPenalty, blocked, maxDim) {
   const free = Array.from({ length: rows }, (_, r) => Array.from({ length: cols }, (_, c) => !blocked[r][c]));
   const pieces = [];
 
@@ -99,13 +105,17 @@ function generateOnce(cols, rows, weightPow, aspectPenalty, blocked) {
       effMaxW[h2] = runningMin;
     }
 
-    const candidates = [];
+    let candidates = [];
     for (let h2 = 1; h2 <= colMaxH; h2++) {
       const maxW = effMaxW[h2];
       for (let w = 1; w <= maxW; w++) {
         const area = w * h2;
         if (ALLOWED_SET.has(area)) candidates.push({ w, h: h2, area });
       }
+    }
+    if (maxDim) {
+      const capped = candidates.filter((c) => Math.max(c.w, c.h) <= maxDim);
+      if (capped.length > 0) candidates = capped;
     }
     if (candidates.length === 0) return null;
 
@@ -146,10 +156,37 @@ function randomBlocks(cols, rows, maxCount) {
   return blocked;
 }
 
-function generatePieces(cols, rows, weightPow, aspectPenalty, maxBlocks, maxTries = 3000) {
+function transposeBlocked(blocked, cols, rows) {
+  const t = Array.from({ length: cols }, () => Array(rows).fill(false));
+  for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++) t[c][r] = blocked[r][c];
+  return t;
+}
+
+// generateOnce always anchors at the topmost row with a free cell - which
+// means all rows ABOVE it are already fully consumed, so the column below
+// the anchor is usually still pristine, while the anchor's own ROW has
+// often already been partially chewed through by earlier pieces sharing
+// it. That structurally favors tall pieces (h > w) over wide ones,
+// regardless of the grid's own shape - a real, measured bias (pieces came
+// out tall ~80% of the time even on grids far wider than they are tall).
+// Fix: run the exact same algorithm on the TRANSPOSED grid instead (so
+// its "tall bias" becomes a "wide bias" in the original orientation), and
+// pick which one to use per PUZZLE, not per retry attempt - re-rolling
+// per attempt would let whichever orientation the RNG-and-retry-loop
+// happens to favor for a given grid shape dominate the outcome, even
+// with a fair coin flip each time.
+function generatePieces(cols, rows, weightPow, aspectPenalty, maxBlocks, maxDim, maxTries = 3000) {
+  const flip = Math.random() < 0.5;
   for (let i = 0; i < maxTries; i++) {
     const blocked = randomBlocks(cols, rows, maxBlocks);
-    const p = generateOnce(cols, rows, weightPow, aspectPenalty, blocked);
+    let p;
+    if (flip) {
+      const blockedT = transposeBlocked(blocked, cols, rows);
+      const piecesT = generateOnce(rows, cols, weightPow, aspectPenalty, blockedT, maxDim);
+      p = piecesT ? piecesT.map((pc) => ({ x: pc.y, y: pc.x, w: pc.h, h: pc.w, area: pc.area })) : null;
+    } else {
+      p = generateOnce(cols, rows, weightPow, aspectPenalty, blocked, maxDim);
+    }
     if (p) return { pieces: p, blocked };
   }
   return null;
@@ -157,7 +194,7 @@ function generatePieces(cols, rows, weightPow, aspectPenalty, maxBlocks, maxTrie
 
 function makePuzzle(difficultyKey) {
   const cfg = DIFFICULTIES[difficultyKey];
-  const { pieces, blocked } = generatePieces(cfg.cols, cfg.rows, cfg.weightPow, cfg.aspectPenalty, cfg.maxBlocks);
+  const { pieces, blocked } = generatePieces(cfg.cols, cfg.rows, cfg.weightPow, cfg.aspectPenalty, cfg.maxBlocks, cfg.maxDim);
   const clues = pieces.map((p, i) => {
     const clueX = p.x + rnd(p.w);
     const clueY = p.y + rnd(p.h);
