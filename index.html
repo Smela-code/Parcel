@@ -498,11 +498,19 @@ function buildSkeleton() {
   newBtn.onclick = () => newGame(difficulty);
   els.clearBtn = document.createElement("button");
   els.clearBtn.className = "pc-btn";
+  els.clearBtn.type = "button";
   els.clearBtn.textContent = "Clear selected";
   Object.assign(els.clearBtn.style, { padding: "7px 16px", borderRadius: "999px", border: "1px solid #E4E0F5", background: "#FFFFFF", fontWeight: 600, fontSize: "13px" });
   els.clearBtn.onclick = clearSelected;
+  const clearAllBtn = document.createElement("button");
+  clearAllBtn.className = "pc-btn";
+  clearAllBtn.type = "button";
+  clearAllBtn.textContent = "Clear all";
+  Object.assign(clearAllBtn.style, { padding: "7px 16px", borderRadius: "999px", border: "1px solid #E4E0F5", background: "#FFFFFF", color: "#2E2B45", fontWeight: 600, fontSize: "13px" });
+  clearAllBtn.onclick = clearAll;
   btnRow.appendChild(newBtn);
   btnRow.appendChild(els.clearBtn);
+  btnRow.appendChild(clearAllBtn);
   app.appendChild(btnRow);
 
   const scrollWrap = document.createElement("div");
@@ -677,6 +685,20 @@ function clearSelected() {
     if (existing.w * existing.h === clue.area) wrongMoves++;
   }
   delete placements[selectedId];
+  refreshUI();
+}
+
+// Wipes every placement on the board back to empty and resets the misstep
+// count to 0 - the same puzzle stays active (not a new one) and the timer
+// keeps running.
+function clearAll() {
+  placements = {};
+  selectedId = null;
+  dragStart = null;
+  dragCurrent = null;
+  wrongMoves = 0;
+  finalTime = null;
+  stopFireworks();
   refreshUI();
 }
 
