@@ -526,10 +526,10 @@ function buildSkeleton() {
   });
   els.dragBadge = document.createElement("div");
   Object.assign(els.dragBadge.style, {
-    position: "absolute", transform: "translateX(-50%)", color: "#FFFFFF",
-    padding: "3px 9px", borderRadius: "6px", fontSize: "12px", fontWeight: 700,
+    position: "fixed", top: "14px", left: "50%", transform: "translateX(-50%)", color: "#FFFFFF",
+    padding: "6px 14px", borderRadius: "8px", fontSize: "14px", fontWeight: 700,
     fontFamily: "'Baloo 2', sans-serif", pointerEvents: "none", whiteSpace: "nowrap",
-    zIndex: 5, display: "none",
+    boxShadow: "0 4px 14px rgba(63,59,92,0.35)", zIndex: 30, display: "none",
   });
   gridWrap.appendChild(els.gridContainer);
   gridWrap.appendChild(els.dragBadge);
@@ -844,16 +844,6 @@ function updateGrid(coverage) {
   }
 }
 
-// Converts a rect defined in LOGICAL coordinates (x=col, y=row, w=col-span,
-// h=row-span) into an on-screen pixel box, accounting for the current
-// transpose state - needed anywhere a logical rect gets positioned visually.
-function logicalRectToScreenBox(rect) {
-  if (layout.transposed) {
-    return { left: rect.y * layout.cell, top: rect.x * layout.cell, width: rect.h * layout.cell, height: rect.w * layout.cell };
-  }
-  return { left: rect.x * layout.cell, top: rect.y * layout.cell, width: rect.w * layout.cell, height: rect.h * layout.cell };
-}
-
 // Live cell count while dragging - shows how many cells are in the
 // in-progress rectangle, and its target size once exactly one clue
 // number falls inside it (most helpful for long, hard-to-eyeball strips).
@@ -868,14 +858,8 @@ function updateDragBadge() {
   const target = coveredByPreview.length === 1 ? coveredByPreview[0].area : null;
   const isOverflow = target !== null && count > target;
   const label = target !== null ? `${count} / ${target}` : `${count} cell${count === 1 ? "" : "s"}`;
-  const box = logicalRectToScreenBox(previewRect);
-  const badgeAboveTop = box.top - 28;
-  const badgeTop = badgeAboveTop >= 0 ? badgeAboveTop : box.top + box.height + 6;
-  const badgeLeft = box.left + box.width / 2;
 
   els.dragBadge.style.display = "block";
-  els.dragBadge.style.left = badgeLeft + "px";
-  els.dragBadge.style.top = badgeTop + "px";
   els.dragBadge.style.background = isOverflow ? "#F2555F" : "#3F3B5C";
   els.dragBadge.textContent = label;
 }
