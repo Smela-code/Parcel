@@ -54,10 +54,10 @@ const ALLOWED_AREAS = [2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 15, 16];
 const ALLOWED_SET = new Set(ALLOWED_AREAS);
 
 const DIFFICULTIES = {
-  Easy: { cols: 11, rows: 9, weightPow: 1.8, aspectPenalty: 0.5, maxBlocks: 0, maxDim: 8, cell: 40 },
-  Medium: { cols: 14, rows: 9, weightPow: 1.5, aspectPenalty: 0.6, maxBlocks: 0, maxDim: 8, cell: 40 },
-  Hard: { cols: 17, rows: 11, weightPow: 1.1, aspectPenalty: 1.2, maxBlocks: 2, maxDim: 8, cell: 36 },
-  Expert: { cols: 17, rows: 13, weightPow: 0.9, aspectPenalty: 1.4, maxBlocks: 3, maxDim: 8, cell: 32 },
+  Easy: { cols: 11, rows: 9, weightPow: 1.8, aspectPenalty: 0.5, maxBlocks: 0, maxDim: 8, cell: 40, specialShapes: false },
+  Medium: { cols: 14, rows: 9, weightPow: 1.5, aspectPenalty: 0.6, maxBlocks: 0, maxDim: 8, cell: 40, specialShapes: false },
+  Hard: { cols: 17, rows: 11, weightPow: 1.1, aspectPenalty: 1.2, maxBlocks: 2, maxDim: 8, cell: 36, specialShapes: false },
+  Expert: { cols: 17, rows: 13, weightPow: 0.9, aspectPenalty: 1.4, maxBlocks: 3, maxDim: 8, cell: 32, specialShapes: true },
 };
 
 function rnd(n) { return Math.floor(Math.random() * n); }
@@ -71,36 +71,86 @@ function rnd(n) { return Math.floor(Math.random() * n); }
 // with an aspect-ratio penalty below, this breaks up the banding and
 // produces much more varied, mixed layouts.
 //
+// "Topmost row with a free cell" means every row ABOVE the anchor is
+// already fully consumed, so the column below the anchor tends to still
+// be pristine, while the anchor's own row has often already been chewed
+// into by earlier pieces sharing it. That structurally favors tall
+// pieces over wide ones, regardless of the grid's own shape - measured
+// at ~80% tall even on grids far wider than they are tall. Flipping the
+// whole generation pass once PER PUZZLE only balanced the population of
+// puzzles, not any single one you're actually looking at - almost every
+// individual puzzle still came out overwhelmingly one direction. So the
+// orientation is chosen fresh for EVERY PIECE instead.
+//
+// But orientation alone isn't the whole story: whichever axis is
+// "primary" for a piece, the search always looks for the LOWEST free
+// index on it - never the highest. That means every piece, regardless
+// of orientation, is still structurally biased toward the (0,0) corner,
+// which is why bigger pieces (needing more open space, only reliably
+// available early in generation) measurably clustered there - as high
+// as ~58% coverage near that corner vs ~4% in the opposite one. Fixed
+// by also randomly mirroring the row axis and column axis independently
+// per piece (on top of the orientation choice), so the search can
+// effectively start from any of the four corners, not just one.
+//
 // maxDim is a HARD cap on how long any single side of a piece can be -
 // unlike aspectPenalty (a soft preference), this makes it flatly
 // impossible for a piece to span most/all of an axis, e.g. a "full-width"
 // 1xN strip. It's only applied when doing so leaves at least one
 // candidate, so it can never cause a dead end on its own.
 function generateOnce(cols, rows, weightPow, aspectPenalty, blocked, maxDim) {
+  // free is always stored in the ORIGINAL (cols, rows) orientation - each
+  // piece just reads/writes through a transformed VIEW of it
   const free = Array.from({ length: rows }, (_, r) => Array.from({ length: cols }, (_, c) => !blocked[r][c]));
   const pieces = [];
 
   while (true) {
+    const flip = Math.random() < 0.5;
+    const mirrorRows = Math.random() < 0.5;
+    const mirrorCols = Math.random() < 0.5;
+    const W = flip ? rows : cols;
+    const H = flip ? cols : rows;
+
+    // maps a (local row, local col) coordinate to the real [row, col] it
+    // corresponds to, applying the orientation flip and both mirrors
+    const toReal = (lr, lc) => {
+      const baseR = flip ? lc : lr;
+      const baseC = flip ? lr : lc;
+      const realR = mirrorRows ? rows - 1 - baseR : baseR;
+      const realC = mirrorCols ? cols - 1 - baseC : baseC;
+      return [realR, realC];
+    };
+    const at = (lr, lc) => {
+      const [r, c] = toReal(lr, lc);
+      return free[r][c];
+    };
+    const setOccupied = (lr, lc) => {
+      const [r, c] = toReal(lr, lc);
+      free[r][c] = false;
+    };
+
     let r0 = -1;
-    for (let r = 0; r < rows; r++) {
-      if (free[r].some(Boolean)) { r0 = r; break; }
+    for (let r = 0; r < H; r++) {
+      let any = false;
+      for (let c = 0; c < W; c++) if (at(r, c)) { any = true; break; }
+      if (any) { r0 = r; break; }
     }
-    if (r0 === -1) break;
+    if (r0 === -1) break; // grid full
+
     const freeColsInRow = [];
-    for (let c = 0; c < cols; c++) if (free[r0][c]) freeColsInRow.push(c);
+    for (let c = 0; c < W; c++) if (at(r0, c)) freeColsInRow.push(c);
     const c0 = freeColsInRow[rnd(freeColsInRow.length)];
 
     let rowMaxW = 0;
-    while (c0 + rowMaxW < cols && free[r0][c0 + rowMaxW]) rowMaxW++;
+    while (c0 + rowMaxW < W && at(r0, c0 + rowMaxW)) rowMaxW++;
     let colMaxH = 0;
-    while (r0 + colMaxH < rows && free[r0 + colMaxH][c0]) colMaxH++;
+    while (r0 + colMaxH < H && at(r0 + colMaxH, c0)) colMaxH++;
 
     const effMaxW = new Array(colMaxH + 1).fill(0);
     let runningMin = rowMaxW;
     for (let h2 = 1; h2 <= colMaxH; h2++) {
       let w = 0;
-      const row = r0 + h2 - 1;
-      while (c0 + w < cols && free[row][c0 + w]) w++;
+      while (c0 + w < W && at(r0 + h2 - 1, c0 + w)) w++;
       runningMin = Math.min(runningMin, w);
       effMaxW[h2] = runningMin;
     }
@@ -133,8 +183,19 @@ function generateOnce(cols, rows, weightPow, aspectPenalty, blocked, maxDim) {
     for (; idx < candidates.length; idx++) { rWeight -= weights[idx]; if (rWeight <= 0) break; }
     const { w, h: hh } = candidates[Math.min(idx, candidates.length - 1)];
 
-    for (let r = r0; r < r0 + hh; r++) for (let c = c0; c < c0 + w; c++) free[r][c] = false;
-    pieces.push({ x: c0, y: r0, w, h: hh, area: w * hh });
+    for (let r = r0; r < r0 + hh; r++) for (let c = c0; c < c0 + w; c++) setOccupied(r, c);
+
+    // map both extreme corners of the local rectangle back to real space
+    // and take the min/max to get the real bounding box - mirroring can
+    // put the "local top-left" at the real bottom-right, so this can't
+    // just translate the anchor corner alone
+    const corner1 = toReal(r0, c0);
+    const corner2 = toReal(r0 + hh - 1, c0 + w - 1);
+    const realY = Math.min(corner1[0], corner2[0]);
+    const realX = Math.min(corner1[1], corner2[1]);
+    const realH = Math.abs(corner1[0] - corner2[0]) + 1;
+    const realW = Math.abs(corner1[1] - corner2[1]) + 1;
+    pieces.push({ x: realX, y: realY, w: realW, h: realH, area: w * hh });
   }
   return pieces;
 }
@@ -156,49 +217,104 @@ function randomBlocks(cols, rows, maxCount) {
   return blocked;
 }
 
-function transposeBlocked(blocked, cols, rows) {
-  const t = Array.from({ length: cols }, () => Array(rows).fill(false));
-  for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++) t[c][r] = blocked[r][c];
-  return t;
+// ---------- Special (star) pieces: irregular L/S-shaped polyominoes ----------
+// These get carved out of the grid BEFORE the rectangle generator runs, using
+// the same "blocked" mechanism as solid blocks - the rectangle algorithm
+// doesn't care about the shape of occupied cells, just that they're taken.
+function lShapeTemplate(n) {
+  // a hook: one cell, then a straight run of (n-1) more perpendicular to it
+  const cells = [[0, 0]];
+  for (let i = 0; i < n - 1; i++) cells.push([1, i]);
+  return cells;
+}
+function sShapeTemplate(n) {
+  // a staircase: 2-cell steps offsetting down-left each time
+  const cells = [];
+  let row = 0, col = 0, cellsThisRow = 0;
+  for (let i = 0; i < n; i++) {
+    cells.push([row, col]);
+    col++;
+    cellsThisRow++;
+    if (cellsThisRow === 2 && i < n - 1) { row++; col--; cellsThisRow = 0; }
+  }
+  return cells;
+}
+function rotate90(cells) { return cells.map(([r, c]) => [c, -r]); }
+function reflectShape(cells) { return cells.map(([r, c]) => [r, -c]); }
+function normalizeShape(cells) {
+  const minR = Math.min(...cells.map((c) => c[0]));
+  const minC = Math.min(...cells.map((c) => c[1]));
+  return cells.map(([r, c]) => [r - minR, c - minC]);
+}
+function randomShapeTransform(cells) {
+  let out = cells;
+  const rots = rnd(4);
+  for (let i = 0; i < rots; i++) out = rotate90(out);
+  if (Math.random() < 0.5) out = reflectShape(out);
+  return normalizeShape(out);
+}
+function tryPlaceSpecialShape(blocked, cols, rows, shapeCells) {
+  for (let attempt = 0; attempt < 150; attempt++) {
+    const cells = randomShapeTransform(shapeCells);
+    const maxR = Math.max(...cells.map((c) => c[0]));
+    const maxC = Math.max(...cells.map((c) => c[1]));
+    if (maxR >= rows || maxC >= cols) continue;
+    const offR = rnd(rows - maxR), offC = rnd(cols - maxC);
+    const placed = cells.map(([r, c]) => [r + offR, c + offC]);
+    if (placed.every(([r, c]) => !blocked[r][c])) {
+      placed.forEach(([r, c]) => (blocked[r][c] = true));
+      return placed;
+    }
+  }
+  return null;
+}
+// places 1-2 special shapes (sizes 3/5/7, L or S) plus the normal random
+// blocks into ONE combined occupied-cells grid, for the rectangle
+// generator to treat identically to ordinary solid blocks
+function placeSpecials(cols, rows, maxBlocks) {
+  const blocked = randomBlocks(cols, rows, maxBlocks);
+  const numSpecials = 1 + rnd(2); // 1 or 2
+  const specials = [];
+  for (let i = 0; i < numSpecials; i++) {
+    const size = [3, 5, 7][rnd(3)];
+    const template = Math.random() < 0.5 ? lShapeTemplate(size) : sShapeTemplate(size);
+    const placed = tryPlaceSpecialShape(blocked, cols, rows, template);
+    if (!placed) return null;
+    specials.push(placed);
+  }
+  return { blocked, specials };
 }
 
-// generateOnce always anchors at the topmost row with a free cell - which
-// means all rows ABOVE it are already fully consumed, so the column below
-// the anchor is usually still pristine, while the anchor's own ROW has
-// often already been partially chewed through by earlier pieces sharing
-// it. That structurally favors tall pieces (h > w) over wide ones,
-// regardless of the grid's own shape - a real, measured bias (pieces came
-// out tall ~80% of the time even on grids far wider than they are tall).
-// Fix: run the exact same algorithm on the TRANSPOSED grid instead (so
-// its "tall bias" becomes a "wide bias" in the original orientation), and
-// pick which one to use per PUZZLE, not per retry attempt - re-rolling
-// per attempt would let whichever orientation the RNG-and-retry-loop
-// happens to favor for a given grid shape dominate the outcome, even
-// with a fair coin flip each time.
-function generatePieces(cols, rows, weightPow, aspectPenalty, maxBlocks, maxDim, maxTries = 3000) {
-  const flip = Math.random() < 0.5;
+function generatePieces(cols, rows, weightPow, aspectPenalty, maxBlocks, maxDim, specialShapes, maxTries = 20000) {
   for (let i = 0; i < maxTries; i++) {
-    const blocked = randomBlocks(cols, rows, maxBlocks);
-    let p;
-    if (flip) {
-      const blockedT = transposeBlocked(blocked, cols, rows);
-      const piecesT = generateOnce(rows, cols, weightPow, aspectPenalty, blockedT, maxDim);
-      p = piecesT ? piecesT.map((pc) => ({ x: pc.y, y: pc.x, w: pc.h, h: pc.w, area: pc.area })) : null;
+    let blocked, specials;
+    if (specialShapes) {
+      const result = placeSpecials(cols, rows, maxBlocks);
+      if (!result) continue;
+      blocked = result.blocked;
+      specials = result.specials;
     } else {
-      p = generateOnce(cols, rows, weightPow, aspectPenalty, blocked, maxDim);
+      blocked = randomBlocks(cols, rows, maxBlocks);
+      specials = [];
     }
-    if (p) return { pieces: p, blocked };
+    const p = generateOnce(cols, rows, weightPow, aspectPenalty, blocked, maxDim);
+    if (p) return { pieces: p, blocked, specials };
   }
   return null;
 }
 
 function makePuzzle(difficultyKey) {
   const cfg = DIFFICULTIES[difficultyKey];
-  const { pieces, blocked } = generatePieces(cfg.cols, cfg.rows, cfg.weightPow, cfg.aspectPenalty, cfg.maxBlocks, cfg.maxDim);
+  const maxTries = cfg.specialShapes ? 40000 : 20000;
+  const { pieces, blocked, specials } = generatePieces(cfg.cols, cfg.rows, cfg.weightPow, cfg.aspectPenalty, cfg.maxBlocks, cfg.maxDim, cfg.specialShapes, maxTries);
   const clues = pieces.map((p, i) => {
     const clueX = p.x + rnd(p.w);
     const clueY = p.y + rnd(p.h);
-    return { id: `c${i}`, clueX, clueY, area: p.area, solution: p };
+    return { id: `c${i}`, clueX, clueY, area: p.area, special: false, solution: p };
+  });
+  specials.forEach((cells, i) => {
+    const [clueY, clueX] = cells[rnd(cells.length)];
+    clues.push({ id: `s${i}`, clueX, clueY, area: cells.length, special: true, solution: { cells } });
   });
   return { clues, cols: cfg.cols, rows: cfg.rows, cell: cfg.cell, blocked };
 }
@@ -526,8 +642,8 @@ function buildSkeleton() {
   });
   els.dragBadge = document.createElement("div");
   Object.assign(els.dragBadge.style, {
-    position: "fixed", top: "14px", left: "50%", transform: "translateX(-50%)", color: "#FFFFFF",
-    padding: "6px 14px", borderRadius: "8px", fontSize: "14px", fontWeight: 700,
+    position: "absolute", color: "#FFFFFF",
+    padding: "5px 12px", borderRadius: "7px", fontSize: "13px", fontWeight: 700,
     fontFamily: "'Baloo 2', sans-serif", pointerEvents: "none", whiteSpace: "nowrap",
     boxShadow: "0 4px 14px rgba(63,59,92,0.35)", zIndex: 30, display: "none",
   });
@@ -847,6 +963,16 @@ function updateGrid(coverage) {
 // Live cell count while dragging - shows how many cells are in the
 // in-progress rectangle, and its target size once exactly one clue
 // number falls inside it (most helpful for long, hard-to-eyeball strips).
+// Converts a rect defined in LOGICAL coordinates (x=col, y=row, w=col-span,
+// h=row-span) into an on-screen pixel box relative to the grid container,
+// accounting for the current transpose state.
+function logicalRectToScreenBox(rect) {
+  if (layout.transposed) {
+    return { left: rect.y * layout.cell, top: rect.x * layout.cell, width: rect.h * layout.cell, height: rect.w * layout.cell };
+  }
+  return { left: rect.x * layout.cell, top: rect.y * layout.cell, width: rect.w * layout.cell, height: rect.h * layout.cell };
+}
+
 function updateDragBadge() {
   const previewRect = computePreviewRect();
   if (!previewRect) {
@@ -859,7 +985,25 @@ function updateDragBadge() {
   const isOverflow = target !== null && count > target;
   const label = target !== null ? `${count} / ${target}` : `${count} cell${count === 1 ? "" : "s"}`;
 
+  // Sits a bit above and to the left of the whole selection by default -
+  // clear of where a finger dragging within/below the selection would be.
+  // Flips to the right when the selection touches the grid's leftmost
+  // column (no room to shift further left), and flips below when there's
+  // no room above (selection touches the top).
+  const box = logicalRectToScreenBox(previewRect);
+  const gapX = 10, gapY = 8, estBadgeWidth = 100, estBadgeHeight = 32;
+  const nearLeftEdge = box.left - estBadgeWidth - gapX < 0;
+  const flipBelow = box.top - estBadgeHeight - gapY < 0;
+
+  const left = nearLeftEdge ? box.left + gapX : box.left - gapX;
+  const top = flipBelow ? box.top + box.height + gapY : box.top - gapY;
+  const translateX = nearLeftEdge ? "0%" : "-100%";
+  const translateY = flipBelow ? "0%" : "-100%";
+
   els.dragBadge.style.display = "block";
+  els.dragBadge.style.left = left + "px";
+  els.dragBadge.style.top = top + "px";
+  els.dragBadge.style.transform = `translate(${translateX}, ${translateY})`;
   els.dragBadge.style.background = isOverflow ? "#F2555F" : "#3F3B5C";
   els.dragBadge.textContent = label;
 }
