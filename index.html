@@ -57,7 +57,7 @@ const DIFFICULTIES = {
   Easy: { cols: 11, rows: 9, weightPow: 1.8, aspectPenalty: 0.5, maxBlocks: 0, maxDim: 8, cell: 40, specialShapes: false },
   Medium: { cols: 14, rows: 9, weightPow: 1.5, aspectPenalty: 0.6, maxBlocks: 0, maxDim: 8, cell: 40, specialShapes: false },
   Hard: { cols: 17, rows: 11, weightPow: 1.1, aspectPenalty: 1.2, maxBlocks: 2, maxDim: 8, cell: 36, specialShapes: false },
-  Expert: { cols: 17, rows: 13, weightPow: 0.9, aspectPenalty: 1.4, maxBlocks: 3, maxDim: 8, cell: 32, specialShapes: true },
+  Expert: { cols: 17, rows: 13, weightPow: 0.9, aspectPenalty: 1.4, maxBlocks: 0, maxDim: 8, cell: 32, specialShapes: true },
 };
 
 function rnd(n) { return Math.floor(Math.random() * n); }
@@ -268,36 +268,41 @@ function tryPlaceSpecialShape(blocked, cols, rows, shapeCells) {
   }
   return null;
 }
-// places 1-2 special shapes (sizes 3/5/7, L or S) plus the normal random
-// blocks into ONE combined occupied-cells grid, for the rectangle
-// generator to treat identically to ordinary solid blocks
+// places 1-2 special shapes (sizes 3/5/7, L or S) on top of any ordinary
+// random blocks. Returns 'blocked' (genuine solid blocks only - what the
+// renderer/interaction should treat as permanently unclickable) separately
+// from 'occupied' (blocked cells PLUS special-shape cells - what the
+// rectangle generator needs to avoid, since it doesn't distinguish shapes).
 function placeSpecials(cols, rows, maxBlocks) {
   const blocked = randomBlocks(cols, rows, maxBlocks);
+  const occupied = blocked.map((row) => row.slice());
   const numSpecials = 1 + rnd(2); // 1 or 2
   const specials = [];
   for (let i = 0; i < numSpecials; i++) {
     const size = [3, 5, 7][rnd(3)];
     const template = Math.random() < 0.5 ? lShapeTemplate(size) : sShapeTemplate(size);
-    const placed = tryPlaceSpecialShape(blocked, cols, rows, template);
+    const placed = tryPlaceSpecialShape(occupied, cols, rows, template);
     if (!placed) return null;
     specials.push(placed);
   }
-  return { blocked, specials };
+  return { blocked, occupied, specials };
 }
 
 function generatePieces(cols, rows, weightPow, aspectPenalty, maxBlocks, maxDim, specialShapes, maxTries = 20000) {
   for (let i = 0; i < maxTries; i++) {
-    let blocked, specials;
+    let blocked, occupied, specials;
     if (specialShapes) {
       const result = placeSpecials(cols, rows, maxBlocks);
       if (!result) continue;
       blocked = result.blocked;
+      occupied = result.occupied;
       specials = result.specials;
     } else {
       blocked = randomBlocks(cols, rows, maxBlocks);
+      occupied = blocked;
       specials = [];
     }
-    const p = generateOnce(cols, rows, weightPow, aspectPenalty, blocked, maxDim);
+    const p = generateOnce(cols, rows, weightPow, aspectPenalty, occupied, maxDim);
     if (p) return { pieces: p, blocked, specials };
   }
   return null;
@@ -347,6 +352,31 @@ function rectContainsClue(clue, rect) {
 function isCorrectPlacement(clue, rect) {
   if (!rect) return false;
   return rect.w * rect.h === clue.area && rectContainsClue(clue, rect);
+}
+
+// A special (star) placement is a set of individual toggled cells rather
+// than a rectangle. Correct only when it's an EXACT match to the target
+// shape's cells - same count, same positions, nothing extra and nothing
+// missing (toggling can't produce duplicates, so a count+subset check is
+// sufficient to prove an exact match).
+function isCorrectSpecialPlacement(clue, placement) {
+  if (!placement || !placement.cells || placement.cells.length !== clue.solution.cells.length) return false;
+  const solutionKeys = new Set(clue.solution.cells.map(([r, c]) => `${r},${c}`));
+  return placement.cells.every(([r, c]) => solutionKeys.has(`${r},${c}`));
+}
+
+// Generic correctness check that dispatches on clue type - used everywhere
+// that needs to treat rectangle and special clues uniformly.
+function isCluePlacementCorrect(clue, placement) {
+  return clue.special ? isCorrectSpecialPlacement(clue, placement) : isCorrectPlacement(clue, placement);
+}
+
+// The number of cells currently placed for a clue, regardless of type -
+// used for the misstep rule ("only counts when the full cell count was
+// selected"), which needs to work the same way for both piece types.
+function placedCellCount(clue, placement) {
+  if (!placement) return 0;
+  return clue.special ? placement.cells.length : placement.w * placement.h;
 }
 
 function rectOverlapsBlocked(rect, blocked) {
@@ -498,6 +528,7 @@ let difficulty = "Medium";
 let puzzle = null;
 let placements = {};
 let selectedId = null;
+let togglingId = null; // clue id currently in tap-to-toggle mode (special/star pieces only)
 let dragStart = null, dragCurrent = null;
 let won = false;
 let elapsed = 0;
@@ -676,7 +707,7 @@ function buildSkeleton() {
   helpIntro.textContent = "Divide the grid into rectangles. Each number is how many cells its rectangle covers. Every cell belongs to exactly one rectangle.";
   const helpText = document.createElement("div");
   Object.assign(helpText.style, { fontSize: "13px", lineHeight: "1.55", color: "#2E2B45" });
-  helpText.textContent = 'Press anywhere and drag to paint a rectangle — release once it covers exactly one number (the number doesn\'t need to be at a corner, or even where you started dragging). A tap with no drag selects an existing rectangle so Backspace/Delete or "Clear selected" can remove it. Escape deselects. On Hard and Expert, a few dark solid cells may appear — no rectangle can ever cover those.';
+  helpText.textContent = 'Press anywhere and drag to paint a rectangle — release once it covers exactly one number (the number doesn\'t need to be at a corner, or even where you started dragging). A tap with no drag selects an existing rectangle so Backspace/Delete or "Clear selected" can remove it. Escape deselects. On Hard, a few dark solid cells may appear — no rectangle can ever cover those. On Expert, one or two pieces are irregular L/S shapes instead of rectangles, marked with a ★ and their cell count. Tap the star to enter tap-to-toggle mode: tap any cell to add or remove it from the shape, then tap the star again to confirm.';
   const helpCloseBtn = document.createElement("button");
   helpCloseBtn.className = "pc-btn";
   helpCloseBtn.type = "button";
@@ -708,7 +739,40 @@ function buildSkeleton() {
   // explicitly so an interrupted gesture never leaves the drag state stuck.
   els.gridContainer.addEventListener("pointerdown", (e) => {
     const cell = cellFromPoint(e.clientX, e.clientY);
+
+    // TAP-TO-TOGGLE mode for a star (special) piece: every tap immediately
+    // flips a cell, never starts a drag. Tapping the star's OWN cell is
+    // reserved specifically for confirming/exiting - it's guaranteed to be
+    // part of the shape, so there's no ambiguity in taking that tap away
+    // from the toggle action.
+    if (togglingId) {
+      const clue = clueByIdMap[togglingId];
+      if (cell.r === clue.clueY && cell.c === clue.clueX) {
+        togglingId = null;
+        refreshUI();
+        return;
+      }
+      const placement = placements[togglingId];
+      const idx = placement.cells.findIndex(([r, c]) => r === cell.r && c === cell.c);
+      if (idx >= 0) placement.cells.splice(idx, 1);
+      else placement.cells.push([cell.r, cell.c]);
+      refreshUI();
+      return;
+    }
+
     if (puzzle.blocked[cell.r][cell.c]) return; // solid blocks can't be painted on or selected
+
+    // tapping a star cell (not already toggling anything) enters toggle
+    // mode instead of starting a drag - star pieces are never dragged
+    const clueHere = cellClue(cell.r, cell.c);
+    if (clueHere && clueHere.special) {
+      selectedId = clueHere.id;
+      if (!placements[clueHere.id]) placements[clueHere.id] = { cells: [[clueHere.clueY, clueHere.clueX]] };
+      togglingId = clueHere.id;
+      refreshUI();
+      return;
+    }
+
     els.gridContainer.setPointerCapture(e.pointerId);
     dragStart = cell;
     dragCurrent = dragStart;
@@ -747,6 +811,7 @@ function buildSkeleton() {
   window.addEventListener("keydown", (e) => {
     if (e.key === "Escape") {
       if (els.helpModal.style.display !== "none") { els.helpModal.style.display = "none"; return; }
+      if (togglingId) { togglingId = null; refreshUI(); return; }
       selectedId = null; dragStart = null; dragCurrent = null; refreshUI();
     }
     if ((e.key === "Backspace" || e.key === "Delete") && selectedId) clearSelected();
@@ -777,8 +842,15 @@ function handlePointerUp(end) {
     const x0 = Math.min(dragStart.c, end.c), x1 = Math.max(dragStart.c, end.c);
     const y0 = Math.min(dragStart.r, end.r), y1 = Math.max(dragStart.r, end.r);
     const rect = { x: x0, y: y0, w: x1 - x0 + 1, h: y1 - y0 + 1 };
-    const covered = puzzle.clues.filter((cl) => rectContainsClue(cl, rect));
-    if (covered.length === 1 && !rectOverlapsBlocked(rect, puzzle.blocked)) {
+    // special (star) clues are never claimed by a drag - only rectangle
+    // clues can, and the drag must also not encroach on a star piece's
+    // reserved cells (those always belong to that piece, whether or not
+    // it's currently toggled to match)
+    const covered = puzzle.clues.filter((cl) => !cl.special && rectContainsClue(cl, rect));
+    const overlapsSpecial = puzzle.clues.some(
+      (cl) => cl.special && cl.solution.cells.some(([r, c]) => c >= rect.x && c < rect.x + rect.w && r >= rect.y && r < rect.y + rect.h)
+    );
+    if (covered.length === 1 && !rectOverlapsBlocked(rect, puzzle.blocked) && !overlapsSpecial) {
       placements[covered[0].id] = rect;
       selectedId = covered[0].id;
     }
@@ -796,11 +868,10 @@ function handlePointerUp(end) {
 function clearSelected() {
   if (!selectedId) return;
   const existing = placements[selectedId];
-  if (existing) {
-    const clue = clueByIdMap[selectedId];
-    if (existing.w * existing.h === clue.area) wrongMoves++;
-  }
+  const clue = clueByIdMap[selectedId];
+  if (existing && placedCellCount(clue, existing) === clue.area) wrongMoves++;
   delete placements[selectedId];
+  if (togglingId === selectedId) togglingId = null;
   refreshUI();
 }
 
@@ -810,6 +881,7 @@ function clearSelected() {
 function clearAll() {
   placements = {};
   selectedId = null;
+  togglingId = null;
   dragStart = null;
   dragCurrent = null;
   wrongMoves = 0;
@@ -825,9 +897,23 @@ function rectFor(clue) {
   return p || { x: clue.clueX, y: clue.clueY, w: 1, h: 1 };
 }
 
+// Cells currently covering a special clue - defaults to just the star's
+// own cell when nothing has been toggled yet, matching how an unplaced
+// rectangle clue defaults to its own 1x1 cell.
+function cellsFor(clue) {
+  const p = placements[clue.id];
+  return p ? p.cells : [[clue.clueY, clue.clueX]];
+}
+
 function computeCoverage() {
   const grid = Array.from({ length: puzzle.rows }, () => Array.from({ length: puzzle.cols }, () => []));
   puzzle.clues.forEach((clue) => {
+    if (clue.special) {
+      cellsFor(clue).forEach(([y, x]) => {
+        if (y >= 0 && y < puzzle.rows && x >= 0 && x < puzzle.cols) grid[y][x].push(clue.id);
+      });
+      return;
+    }
     const r = rectFor(clue);
     for (let y = r.y; y < r.y + r.h; y++) {
       for (let x = r.x; x < r.x + r.w; x++) {
@@ -841,6 +927,10 @@ function computeCoverage() {
 function computeCellCoverage(r, c) {
   const ids = [];
   puzzle.clues.forEach((clue) => {
+    if (clue.special) {
+      if (cellsFor(clue).some(([cr, cc]) => cr === r && cc === c)) ids.push(clue.id);
+      return;
+    }
     const rect = rectFor(clue);
     if (c >= rect.x && c < rect.x + rect.w && r >= rect.y && r < rect.y + rect.h) ids.push(clue.id);
   });
@@ -851,7 +941,7 @@ function computeWon(coverage) {
   for (let r = 0; r < puzzle.rows; r++)
     for (let c = 0; c < puzzle.cols; c++)
       if (coverage[r][c].length > 1) return false;
-  return puzzle.clues.every((clue) => isCorrectPlacement(clue, placements[clue.id]));
+  return puzzle.clues.every((clue) => isCluePlacementCorrect(clue, placements[clue.id]));
 }
 
 // ---------- Building/refreshing the grid ----------
@@ -914,7 +1004,7 @@ function updateGrid(coverage) {
       else if (conflict) bg = "#F2555F55";
       else if (coveredBy) {
         const p = placements[coveredBy];
-        const correct = isCorrectPlacement(clueByIdMap[coveredBy], p);
+        const correct = isCluePlacementCorrect(clueByIdMap[coveredBy], p);
         bg = correct ? clueColorMap[coveredBy] : fadedColorMap[coveredBy];
       }
 
@@ -927,9 +1017,9 @@ function updateGrid(coverage) {
       // simply not painted yet (that's just plain unpainted, not "incomplete")
       const pieceIncomplete = (id) => {
         if (!id || id === "edge") return false;
-        const rect = placements[id];
-        if (!rect) return false; // never attempted
-        return !isCorrectPlacement(clueByIdMap[id], rect);
+        const p = placements[id];
+        if (!p) return false; // never attempted
+        return !isCluePlacementCorrect(clueByIdMap[id], p);
       };
 
       const rightId = c + 1 < puzzle.cols ? (coverage[r][c + 1][0] ?? null) : "edge";
@@ -946,16 +1036,18 @@ function updateGrid(coverage) {
       const rightDashed = rightIsBoundary && (pieceIncomplete(thisId) || pieceIncomplete(screenRightId));
       const bottomDashed = bottomIsBoundary && (pieceIncomplete(thisId) || pieceIncomplete(screenBottomId));
 
+      const isToggling = !!(clue && clue.id === togglingId);
+
       btn.style.border = "1px solid #E4E0F5";
       btn.style.borderRight = rightIsBoundary ? `2px ${rightDashed ? "dashed" : "solid"} #A79CD9` : "1px solid #EDEAF7";
       btn.style.borderBottom = bottomIsBoundary ? `2px ${bottomDashed ? "dashed" : "solid"} #A79CD9` : "1px solid #EDEAF7";
       btn.style.background = inPreview ? "#F2994A33" : bg;
       btn.style.backgroundImage = "none";
       btn.style.cursor = isBlocked ? "default" : "pointer";
-      btn.style.outline = isSelected ? "3px solid #5B8DEF" : inPreview ? "2px dashed #F2994A" : "none";
+      btn.style.outline = isToggling ? "3px solid #F2994A" : isSelected ? "3px solid #5B8DEF" : inPreview ? "2px dashed #F2994A" : "none";
       btn.style.outlineOffset = "-2px";
-      btn.textContent = clue ? clue.area : "";
-      btn.setAttribute("aria-label", isBlocked ? `Row ${r + 1} column ${c + 1}, solid block` : clue ? `Row ${r + 1} column ${c + 1}, clue ${clue.area}` : `Row ${r + 1} column ${c + 1}`);
+      btn.textContent = clue ? (clue.special ? `★${clue.area}` : clue.area) : "";
+      btn.setAttribute("aria-label", isBlocked ? `Row ${r + 1} column ${c + 1}, solid block` : clue ? `Row ${r + 1} column ${c + 1}, ${clue.special ? "star " : ""}clue ${clue.area}` : `Row ${r + 1} column ${c + 1}`);
     }
   }
 }
@@ -975,28 +1067,53 @@ function logicalRectToScreenBox(rect) {
 
 function updateDragBadge() {
   const previewRect = computePreviewRect();
+
+  if (togglingId) {
+    // star pieces are never dragged, so previewRect is always null here -
+    // show toggle progress instead, anchored near the star cell
+    const clue = clueByIdMap[togglingId];
+    const count = placements[togglingId].cells.length;
+    const box = logicalRectToScreenBox({ x: clue.clueX, y: clue.clueY, w: 1, h: 1 });
+    const gapX = 10, gapY = 8, estBadgeWidth = 100, estBadgeHeight = 32;
+    const nearLeftEdge = box.left - estBadgeWidth - gapX < 0;
+    const flipBelow = box.top - estBadgeHeight - gapY < 0;
+    const left = nearLeftEdge ? box.left + gapX : box.left - gapX;
+    const top = flipBelow ? box.top + box.height + gapY : box.top - gapY;
+    els.dragBadge.style.display = "block";
+    els.dragBadge.style.left = left + "px";
+    els.dragBadge.style.top = top + "px";
+    els.dragBadge.style.transform = `translate(${nearLeftEdge ? "0%" : "-100%"}, ${flipBelow ? "0%" : "-100%"})`;
+    els.dragBadge.style.background = count === clue.area ? "#3F3B5C" : "#F2994A";
+    els.dragBadge.textContent = `${count} / ${clue.area} — tap ★ to confirm`;
+    return;
+  }
+
   if (!previewRect) {
     els.dragBadge.style.display = "none";
     return;
   }
   const count = previewRect.w * previewRect.h;
-  const coveredByPreview = puzzle.clues.filter((cl) => rectContainsClue(cl, previewRect));
+  // special (star) clues are never targeted by a drag
+  const coveredByPreview = puzzle.clues.filter((cl) => !cl.special && rectContainsClue(cl, previewRect));
   const target = coveredByPreview.length === 1 ? coveredByPreview[0].area : null;
   const isOverflow = target !== null && count > target;
   const label = target !== null ? `${count} / ${target}` : `${count} cell${count === 1 ? "" : "s"}`;
 
-  // Sits a bit above and to the left of the whole selection by default -
-  // clear of where a finger dragging within/below the selection would be.
-  // Flips to the right when the selection touches the grid's leftmost
-  // column (no room to shift further left), and flips below when there's
-  // no room above (selection touches the top).
-  const box = logicalRectToScreenBox(previewRect);
+  // Anchored to the FIXED start of the drag (not the whole, growing
+  // selection) - dragStart never moves during a single gesture, so this
+  // stays put for the whole drag instead of jumping around. Anchoring to
+  // the whole selection's box seems reasonable at first, but that box's
+  // own top-left corner converges toward wherever the cursor currently is
+  // whenever you drag up or left (extending that same corner) - putting
+  // the badge right where the finger is, and then causing a big jump the
+  // instant the flip threshold got crossed near an edge.
+  const anchorBox = logicalRectToScreenBox({ x: dragStart.c, y: dragStart.r, w: 1, h: 1 });
   const gapX = 10, gapY = 8, estBadgeWidth = 100, estBadgeHeight = 32;
-  const nearLeftEdge = box.left - estBadgeWidth - gapX < 0;
-  const flipBelow = box.top - estBadgeHeight - gapY < 0;
+  const nearLeftEdge = anchorBox.left - estBadgeWidth - gapX < 0;
+  const flipBelow = anchorBox.top - estBadgeHeight - gapY < 0;
 
-  const left = nearLeftEdge ? box.left + gapX : box.left - gapX;
-  const top = flipBelow ? box.top + box.height + gapY : box.top - gapY;
+  const left = nearLeftEdge ? anchorBox.left + gapX : anchorBox.left - gapX;
+  const top = flipBelow ? anchorBox.top + anchorBox.height + gapY : anchorBox.top - gapY;
   const translateX = nearLeftEdge ? "0%" : "-100%";
   const translateY = flipBelow ? "0%" : "-100%";
 
@@ -1015,9 +1132,18 @@ function refreshUI() {
   if (nowWon && !won) {
     finalTime = elapsed;
     const origins = puzzle.clues.map((clue, i) => {
-      const rect = placements[clue.id];
-      const xFrac = layout.transposed ? (rect.y + rect.h / 2) / puzzle.rows : (rect.x + rect.w / 2) / puzzle.cols;
-      const yFrac = layout.transposed ? (rect.x + rect.w / 2) / puzzle.cols : (rect.y + rect.h / 2) / puzzle.rows;
+      let cx, cy;
+      if (clue.special) {
+        const cells = placements[clue.id].cells;
+        cx = cells.reduce((s, [, c]) => s + c, 0) / cells.length + 0.5;
+        cy = cells.reduce((s, [r]) => s + r, 0) / cells.length + 0.5;
+      } else {
+        const rect = placements[clue.id];
+        cx = rect.x + rect.w / 2;
+        cy = rect.y + rect.h / 2;
+      }
+      const xFrac = layout.transposed ? cy / puzzle.rows : cx / puzzle.cols;
+      const yFrac = layout.transposed ? cx / puzzle.cols : cy / puzzle.rows;
       return { xFrac, yFrac, color: vividColorForIndex(i) };
     });
     startFireworks(origins, els.gridContainer);
@@ -1027,7 +1153,7 @@ function refreshUI() {
   updateGrid(coverage);
   updateDragBadge();
 
-  els.gridSizeInfo.textContent = `${puzzle.cols} × ${puzzle.rows} grid — ${puzzle.clues.length} rectangles to place`;
+  els.gridSizeInfo.textContent = `${puzzle.cols} × ${puzzle.rows} grid — ${puzzle.clues.length} pieces to place`;
   els.timer.textContent = "⏱ " + formatTime(elapsed);
   els.wrongMoves.textContent = "✗ " + wrongMoves + " misstep" + (wrongMoves === 1 ? "" : "s");
   els.wrongMoves.style.color = wrongMoves > 0 ? "#F2555F" : "#2E2B45";
