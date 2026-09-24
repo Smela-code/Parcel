@@ -846,7 +846,12 @@ function updateGrid(coverage) {
       if (conflict) bg = "#F2555F55";
       else if (coveredBy) {
         const p = placements[coveredBy];
-        const correct = isCorrectPlacement(clueByIdMap[coveredBy], p);
+        const clueHere = clueByIdMap[coveredBy];
+        // never reveal whether a "?" guess is right through color - it
+        // stays neutral regardless of correctness, or trying different
+        // sizes until the fill "locks in" would be the same as seeing
+        // the number
+        const correct = (!clueHere.hidden || won) && isCorrectPlacement(clueHere, p);
         bg = correct ? clueColorMap[coveredBy] : fadedColorMap[coveredBy];
       }
 
@@ -856,12 +861,17 @@ function updateGrid(coverage) {
 
       // a boundary gets dashed only when one of its two sides is a piece
       // the player actually ATTEMPTED but got wrong - never for area that's
-      // simply not painted yet (that's just plain unpainted, not "incomplete")
+      // simply not painted yet (that's just plain unpainted, not "incomplete").
+      // A hidden ("?") clue is always treated as incomplete here too, for
+      // the same reason as the fill color above - a boundary quietly
+      // turning solid would be just as much a leak as the color would.
       const pieceIncomplete = (id) => {
         if (!id || id === "edge") return false;
         const p = placements[id];
         if (!p) return false; // never attempted
-        return !isCorrectPlacement(clueByIdMap[id], p);
+        const clueHere = clueByIdMap[id];
+        if (clueHere.hidden && !won) return true;
+        return !isCorrectPlacement(clueHere, p);
       };
 
       const rightId = c + 1 < puzzle.cols ? (coverage[r][c + 1][0] ?? null) : "edge";
@@ -886,8 +896,8 @@ function updateGrid(coverage) {
       btn.style.cursor = "pointer";
       btn.style.outline = isSelected ? "3px solid #5B8DEF" : inPreview ? "2px dashed #F2994A" : "none";
       btn.style.outlineOffset = "-2px";
-      btn.textContent = clue ? (clue.hidden ? "?" : clue.area) : "";
-      btn.setAttribute("aria-label", clue ? `Row ${r + 1} column ${c + 1}, clue ${clue.hidden ? "hidden" : clue.area}` : `Row ${r + 1} column ${c + 1}`);
+      btn.textContent = clue ? (clue.hidden && !won ? "?" : clue.area) : "";
+      btn.setAttribute("aria-label", clue ? `Row ${r + 1} column ${c + 1}, clue ${clue.hidden && !won ? "hidden" : clue.area}` : `Row ${r + 1} column ${c + 1}`);
     }
   }
 }
